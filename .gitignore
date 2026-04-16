@@ -24,9 +24,11 @@ dist_release/
 logs/
 config.toml
 
+
 # Non-runtime project assets
 AGENT.md
 TASKS.md
+README.md
 docs/
 tests/
 scripts/
