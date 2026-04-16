@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photo-organizer"
+version = "0.1.0"
+description = "PhotoOrganizer V1 desktop application"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6>=6.7",
+  "exifread>=3.0.0",
+  "Pillow>=10.4.0",
+  "piexif>=1.1.3",
+  "pymediainfo>=6.1.0",
+  "send2trash>=1.8.3",
+]
+
+[project.scripts]
+photo-organizer = "photo_organizer.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

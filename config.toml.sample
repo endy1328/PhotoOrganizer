@@ -1,0 +1,5 @@
+[app]
+source_path = "C:\\source"
+target_path = "D:\\target"
+device_name_override = "GSX"
+operation_mode = "copy"
