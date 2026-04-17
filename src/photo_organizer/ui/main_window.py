@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from ..config import ConfigManager
 from ..engine import OrganizerEngine
+from .. import __version__
 from ..models import AppSettings, DeleteReviewItem, OrganizeRequest, PreviewBundle, PreviewItem
 
 
@@ -55,7 +56,7 @@ class MainWindow(QMainWindow):
         self.last_preview_signature: tuple[str, str, str, str] | None = None
         self._current_preview_source_path: Path | None = None
 
-        self.setWindowTitle("PhotoOrganizer")
+        self.setWindowTitle(f"PhotoOrganizer {__version__}")
         self.resize(1400, 860)
         self._build_ui()
         self._load_settings()

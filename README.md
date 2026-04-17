@@ -1,9 +1,10 @@
-# PhotoOrganizer
+# PhotoOrganizer 1.0
 
-PhotoOrganizer는 Source 경로 아래 여러 폴더에 흩어져 있는 사진과 영상 파일을 읽어, 메타데이터 또는 파일명 정보를 기준으로 Target 경로 아래 규칙적인 디렉토리 구조로 정리하는 Python + PySide6 데스크톱 프로그램이다.
+PhotoOrganizer 1.0은 Source 경로 아래 여러 폴더에 흩어져 있는 사진과 영상 파일을 읽어, 메타데이터 또는 파일명 정보를 기준으로 Target 경로 아래 규칙적인 디렉토리 구조로 정리하는 Python + PySide6 데스크톱 프로그램이다.
 
 ## 현재 상태
 
+- 현재 버전은 `1.0`이다.
 - 실행 가능한 PyInstaller 산출물 `dist/PhotoOrganizer.exe`가 포함되어 있다.
 - Source/Target 선택, 미리보기, 실행, 오류 확인, 삭제 리뷰 흐름을 사용할 수 있다.
 - 설정은 `config.toml`, 로그는 `logs` 폴더에 저장된다.
