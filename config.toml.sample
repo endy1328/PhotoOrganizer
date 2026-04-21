@@ -3,3 +3,7 @@ source_path = "C:\\source"
 target_path = "D:\\target"
 device_name_override = "GSX"
 operation_mode = "copy"
+mobile_output_enabled = true
+mobile_output_max_width = 3000
+mobile_output_jpeg_quality = 75
+mobile_output_keep_smaller_original = true

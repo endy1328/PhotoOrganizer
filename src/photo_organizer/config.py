@@ -27,6 +27,10 @@ class ConfigManager:
                 target_path=str(app.get("target_path", "")),
                 device_name_override=str(app.get("device_name_override", "")),
                 operation_mode=str(app.get("operation_mode", "copy")),
+                mobile_output_enabled=bool(app.get("mobile_output_enabled", True)),
+                mobile_output_max_width=int(app.get("mobile_output_max_width", 3000)),
+                mobile_output_jpeg_quality=int(app.get("mobile_output_jpeg_quality", 75)),
+                mobile_output_keep_smaller_original=bool(app.get("mobile_output_keep_smaller_original", True)),
             )
         except Exception:
             return AppSettings()
@@ -39,6 +43,10 @@ class ConfigManager:
                 f'target_path = {self._quote(settings.target_path)}',
                 f'device_name_override = {self._quote(settings.device_name_override)}',
                 f'operation_mode = {self._quote(settings.operation_mode)}',
+                f"mobile_output_enabled = {self._bool_literal(settings.mobile_output_enabled)}",
+                f"mobile_output_max_width = {settings.mobile_output_max_width}",
+                f"mobile_output_jpeg_quality = {settings.mobile_output_jpeg_quality}",
+                f"mobile_output_keep_smaller_original = {self._bool_literal(settings.mobile_output_keep_smaller_original)}",
                 "",
             ]
         )
@@ -58,3 +66,6 @@ class ConfigManager:
     def _quote(self, value: str) -> str:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
+
+    def _bool_literal(self, value: bool) -> str:
+        return "true" if value else "false"

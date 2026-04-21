@@ -17,6 +17,10 @@ class AppSettings:
     target_path: str = ""
     device_name_override: str = ""
     operation_mode: str = "copy"
+    mobile_output_enabled: bool = True
+    mobile_output_max_width: int = 3000
+    mobile_output_jpeg_quality: int = 75
+    mobile_output_keep_smaller_original: bool = True
 
 
 @dataclass(slots=True)
@@ -26,6 +30,10 @@ class OrganizeRequest:
     device_name_override: str = ""
     operation_mode: str = "copy"
     preview_only: bool = True
+    mobile_output_enabled: bool = True
+    mobile_output_max_width: int = 3000
+    mobile_output_jpeg_quality: int = 75
+    mobile_output_keep_smaller_original: bool = True
 
 
 @dataclass(slots=True)
@@ -59,6 +67,9 @@ class PreviewItem:
     model_name: str
     model_source: str
     warnings: list[str]
+    metadata_entries: list[tuple[str, str]] = field(default_factory=list)
+    mobile_output_enabled: bool = False
+    mobile_output_path: str = ""
     status: str = "READY"
 
 
@@ -77,6 +88,8 @@ class ExecutionResult:
     action: str
     write_mode: str = "NEW"
     message: str = ""
+    mobile_output_path: str = ""
+    mobile_output_status: str = ""
 
 
 @dataclass(slots=True)

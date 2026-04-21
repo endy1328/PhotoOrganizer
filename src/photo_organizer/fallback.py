@@ -34,7 +34,7 @@ def parse_filename_fallback(filename: str) -> tuple[datetime | None, str | None,
         groups = match.groupdict()
         parsed_at = _parse_date_time(groups.get("date"), groups.get("time"))
         model = groups.get("model")
-        return parsed_at, sanitize_model_name(model) if model else None, label
+        return parsed_at, sanitize_model_name(_strip_seq_suffix(model)) if model else None, label
     return None, None, "UNKNOWN"
 
 
@@ -66,6 +66,12 @@ def sanitize_model_name(value: str | None) -> str:
     if not sanitized:
         return "UNKNOWN"
     return "UNKNOWN" if sanitized.lower() == "unknown" else sanitized
+
+
+def _strip_seq_suffix(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return re.sub(r"[_-]\d{4}$", "", value)
 
 
 def _parse_date_time(date_text: str | None, time_text: str | None) -> datetime | None:

@@ -8,8 +8,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -20,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QStyledItemDelegate,
     QTableWidget,
@@ -32,7 +36,8 @@ from PySide6.QtWidgets import (
 from ..config import ConfigManager
 from ..engine import OrganizerEngine
 from .. import __version__
-from ..models import AppSettings, DeleteReviewItem, OrganizeRequest, PreviewBundle, PreviewItem
+from ..models import AppSettings, DeleteReviewItem, ExecutionBundle, OrganizeRequest, PreviewBundle, PreviewItem, VIDEO_EXTENSIONS
+from ..video_thumbnail import extract_video_thumbnail_bytes
 
 
 class ClippedItemDelegate(QStyledItemDelegate):
@@ -45,6 +50,83 @@ class ClippedItemDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent: QWidget | None, settings: AppSettings) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("환경설정")
+        self.setModal(True)
+        self.resize(520, 260)
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "모바일 출력은 사진 파일만 대상으로 하고, 결과는 각 모델 디렉토리 아래 "
+            "`output_YYYYMMDD_MODEL` 폴더에 생성됩니다."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        group = QGroupBox("모바일 출력")
+        form_layout = QFormLayout(group)
+        self.enabled_checkbox = QCheckBox("모바일 출력 생성 사용")
+        self.enabled_checkbox.setChecked(settings.mobile_output_enabled)
+        self.max_width_spin = QSpinBox()
+        self.max_width_spin.setRange(500, 8000)
+        self.max_width_spin.setValue(settings.mobile_output_max_width)
+        self.jpeg_quality_spin = QSpinBox()
+        self.jpeg_quality_spin.setRange(1, 100)
+        self.jpeg_quality_spin.setValue(settings.mobile_output_jpeg_quality)
+        self.keep_smaller_checkbox = QCheckBox("원본 가로가 더 작으면 원본 크기 유지")
+        self.keep_smaller_checkbox.setChecked(settings.mobile_output_keep_smaller_original)
+        self.keep_smaller_checkbox.setEnabled(False)
+
+        form_layout.addRow("", self.enabled_checkbox)
+        form_layout.addRow("최대 가로 크기(px)", self.max_width_spin)
+        form_layout.addRow("JPEG 품질", self.jpeg_quality_spin)
+        form_layout.addRow("", self.keep_smaller_checkbox)
+        layout.addWidget(group)
+
+        note = QLabel(
+            "대상 포맷: JPG/JPEG/PNG/HEIC 사진만\n"
+            "영상 파일은 모바일 출력 대상에서 제외됩니다.\n"
+            "모바일 출력 생성 실패 시 전체 실행을 실패로 처리합니다."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        restore_button = buttons.addButton("기본값 복원", QDialogButtonBox.ResetRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        restore_button.clicked.connect(self._restore_defaults)
+        layout.addWidget(buttons)
+
+        self.enabled_checkbox.toggled.connect(self._sync_enabled_state)
+        self._sync_enabled_state(self.enabled_checkbox.isChecked())
+
+    def _restore_defaults(self) -> None:
+        self.enabled_checkbox.setChecked(True)
+        self.max_width_spin.setValue(3000)
+        self.jpeg_quality_spin.setValue(75)
+        self.keep_smaller_checkbox.setChecked(True)
+
+    def _sync_enabled_state(self, enabled: bool) -> None:
+        self.max_width_spin.setEnabled(enabled)
+        self.jpeg_quality_spin.setEnabled(enabled)
+        self.keep_smaller_checkbox.setEnabled(False)
+
+    def to_settings(self, current: AppSettings) -> AppSettings:
+        return AppSettings(
+            source_path=current.source_path,
+            target_path=current.target_path,
+            device_name_override=current.device_name_override,
+            operation_mode=current.operation_mode,
+            mobile_output_enabled=self.enabled_checkbox.isChecked(),
+            mobile_output_max_width=self.max_width_spin.value(),
+            mobile_output_jpeg_quality=self.jpeg_quality_spin.value(),
+            mobile_output_keep_smaller_original=self.keep_smaller_checkbox.isChecked(),
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, engine: OrganizerEngine, config_manager: ConfigManager) -> None:
         super().__init__()
@@ -53,8 +135,10 @@ class MainWindow(QMainWindow):
         self.settings = self.config_manager.load()
         self.current_delete_candidates: list[DeleteReviewItem] = []
         self.last_preview_bundle = None
-        self.last_preview_signature: tuple[str, str, str, str] | None = None
+        self.last_preview_signature: tuple[str, str, str, str, str, str, str, str] | None = None
+        self.last_execution_bundle: ExecutionBundle | None = None
         self._current_preview_source_path: Path | None = None
+        self._video_thumbnail_cache: dict[tuple[str, int], QPixmap] = {}
 
         self.setWindowTitle(f"PhotoOrganizer {__version__}")
         self.resize(1400, 860)
@@ -109,6 +193,13 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.preview_button)
         button_row.addWidget(self.execute_button)
         button_row.addWidget(self.delete_button)
+        button_row.addStretch(1)
+        self.mobile_output_summary = QLabel()
+        self.mobile_output_summary.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.settings_button = QPushButton("환경설정")
+        self.settings_button.clicked.connect(self._open_settings_dialog)
+        button_row.addWidget(self.mobile_output_summary)
+        button_row.addWidget(self.settings_button)
         layout.addLayout(button_row)
 
         self.status_label = QLabel("초기/미선택")
@@ -140,12 +231,9 @@ class MainWindow(QMainWindow):
         self.selection_splitter = QSplitter(Qt.Horizontal)
         self.selection_splitter.setChildrenCollapsible(False)
         self.selection_image_panel = self._build_selection_image_panel()
-        self.selection_detail = QPlainTextEdit()
-        self.selection_detail.setReadOnly(True)
-        self.selection_detail.setPlaceholderText("선택한 항목의 전체 경로와 세부 내용이 여기에 표시됩니다.")
-        self.selection_detail.setMinimumHeight(120)
+        self.selection_detail_panel = self._build_selection_detail_panel()
         self.selection_splitter.addWidget(self.selection_image_panel)
-        self.selection_splitter.addWidget(self.selection_detail)
+        self.selection_splitter.addWidget(self.selection_detail_panel)
         self.selection_splitter.setStretchFactor(0, 1)
         self.selection_splitter.setStretchFactor(1, 2)
         splitter.addWidget(self.selection_splitter)
@@ -198,11 +286,51 @@ class MainWindow(QMainWindow):
         self.preview_image_scroll.setWidget(self.preview_image_view)
         layout.addWidget(self.preview_image_scroll, 1)
 
-        self.preview_image_info = QLabel("사진 파일은 축소 로드해서 표시하고, 비사진/영상은 미리보기 불가로 표시합니다.")
+        self.preview_image_info = QLabel("사진 파일은 축소 로드하고, 영상 파일은 썸네일을 추출해 표시합니다.")
         self.preview_image_info.setWordWrap(True)
         self.preview_image_info.setStyleSheet("color: #666;")
         layout.addWidget(self.preview_image_info)
         self._set_preview_image_placeholder("미리보기에서 사진을 선택하면 왼쪽에 이미지가 표시됩니다.")
+        return panel
+
+    def _build_selection_detail_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        info_title = QLabel("선택 항목 정보")
+        info_title.setStyleSheet("font-weight: 600;")
+        layout.addWidget(info_title)
+
+        self.selection_detail = QPlainTextEdit()
+        self.selection_detail.setReadOnly(True)
+        self.selection_detail.setPlaceholderText("선택한 항목의 전체 경로와 세부 내용이 여기에 표시됩니다.")
+        self.selection_detail.setMinimumHeight(140)
+        layout.addWidget(self.selection_detail)
+
+        metadata_title = QLabel("메타정보")
+        metadata_title.setStyleSheet("font-weight: 600;")
+        layout.addWidget(metadata_title)
+
+        self.selection_metadata_table = QTableWidget(0, 2)
+        self.selection_metadata_table.setHorizontalHeaderLabels(["항목", "값"])
+        self.selection_metadata_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.selection_metadata_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.selection_metadata_table.setFocusPolicy(Qt.NoFocus)
+        self.selection_metadata_table.setWordWrap(False)
+        self.selection_metadata_table.setTextElideMode(Qt.ElideNone)
+        self.selection_metadata_table.setItemDelegate(ClippedItemDelegate(self.selection_metadata_table))
+        self.selection_metadata_table.verticalHeader().setVisible(False)
+        self.selection_metadata_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        metadata_header = self.selection_metadata_table.horizontalHeader()
+        metadata_header.setSectionsMovable(False)
+        metadata_header.setSectionResizeMode(0, QHeaderView.Interactive)
+        metadata_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.selection_metadata_table.setColumnWidth(0, 180)
+        self.selection_metadata_table.setMinimumHeight(180)
+        layout.addWidget(self.selection_metadata_table, 1)
+
         return panel
 
     def _build_delete_table(self) -> QTableWidget:
@@ -251,6 +379,7 @@ class MainWindow(QMainWindow):
         index = self.mode_combo.findText(self.settings.operation_mode)
         if index >= 0:
             self.mode_combo.setCurrentIndex(index)
+        self._update_mobile_output_summary()
 
     def _save_settings(self) -> None:
         self.config_manager.save(self._current_settings())
@@ -264,6 +393,26 @@ class MainWindow(QMainWindow):
             target_path=self.target_edit.text().strip(),
             device_name_override=self.device_name_edit.text().strip(),
             operation_mode=self.mode_combo.currentText(),
+            mobile_output_enabled=self.settings.mobile_output_enabled,
+            mobile_output_max_width=self.settings.mobile_output_max_width,
+            mobile_output_jpeg_quality=self.settings.mobile_output_jpeg_quality,
+            mobile_output_keep_smaller_original=self.settings.mobile_output_keep_smaller_original,
+        )
+
+    def _open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self, self._current_settings())
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.settings = dialog.to_settings(self._current_settings())
+        self._update_mobile_output_summary()
+        self._save_current_inputs()
+
+    def _update_mobile_output_summary(self) -> None:
+        if not self.settings.mobile_output_enabled:
+            self.mobile_output_summary.setText("모바일 출력: 사용 안 함")
+            return
+        self.mobile_output_summary.setText(
+            f"모바일 출력: 사용 / {self.settings.mobile_output_max_width}px / 품질 {self.settings.mobile_output_jpeg_quality}"
         )
 
     def _select_directory(self, line_edit: QLineEdit) -> None:
@@ -302,14 +451,22 @@ class MainWindow(QMainWindow):
             device_name_override=self.device_name_edit.text().strip(),
             operation_mode=self.mode_combo.currentText(),
             preview_only=preview_only,
+            mobile_output_enabled=self.settings.mobile_output_enabled,
+            mobile_output_max_width=self.settings.mobile_output_max_width,
+            mobile_output_jpeg_quality=self.settings.mobile_output_jpeg_quality,
+            mobile_output_keep_smaller_original=self.settings.mobile_output_keep_smaller_original,
         )
 
-    def _request_signature(self, request: OrganizeRequest) -> tuple[str, str, str, str]:
+    def _request_signature(self, request: OrganizeRequest) -> tuple[str, str, str, str, str, str, str, str]:
         return (
             str(request.source_path.resolve()),
             str(request.target_path.resolve()),
             request.device_name_override.strip(),
             request.operation_mode,
+            str(request.mobile_output_enabled),
+            str(request.mobile_output_max_width),
+            str(request.mobile_output_jpeg_quality),
+            str(request.mobile_output_keep_smaller_original),
         )
 
     def _handle_preview(self) -> None:
@@ -321,6 +478,7 @@ class MainWindow(QMainWindow):
         bundle = self.engine.preview(request, progress_callback=self._update_progress)
         self.last_preview_bundle = bundle
         self.last_preview_signature = self._request_signature(request)
+        self.last_execution_bundle = None
         self.current_delete_candidates = []
         self._fill_preview_table(bundle.preview_items)
         self._fill_error_table(bundle.error_items)
@@ -351,13 +509,17 @@ class MainWindow(QMainWindow):
                 log_events=bundle.log_events,
             )
             self.last_preview_signature = current_signature
+        self.last_execution_bundle = bundle
         self.current_delete_candidates = bundle.delete_review_items
         self._fill_preview_table(bundle.preview_items)
         self._fill_results_table(bundle.execution_results)
         self._fill_error_table(bundle.error_items)
         self._fill_delete_table(bundle.delete_review_items)
         self.delete_button.setEnabled(bool(bundle.delete_review_items))
-        if bundle.error_items and bundle.execution_results:
+        mobile_output_failed = any(item.mobile_output_status == "ERROR" for item in bundle.execution_results)
+        if mobile_output_failed:
+            self._set_status("실행 실패")
+        elif bundle.error_items and bundle.execution_results:
             self._set_status("부분 성공")
         elif bundle.error_items:
             self._set_status("오류 발생")
@@ -457,9 +619,11 @@ class MainWindow(QMainWindow):
         if table_name == "preview":
             selected_items = self.preview_table.selectedItems()
             if not selected_items:
-                self.selection_detail.setPlainText("미리보기 항목을 선택하면 전체 원본 경로와 대상 경로를 여기서 확인할 수 있습니다.")
+                self._set_selection_detail_text("미리보기 항목을 선택하면 전체 원본 경로와 대상 경로를 여기서 확인할 수 있습니다.")
+                self._set_selection_metadata([])
                 return
             row = selected_items[0].row()
+            preview_item = self.last_preview_bundle.preview_items[row] if self.last_preview_bundle and row < len(self.last_preview_bundle.preview_items) else None
             lines = [
                 f"원본 경로: {self._cell_text(self.preview_table, row, 0)}",
                 f"대상 경로: {self._cell_text(self.preview_table, row, 1)}",
@@ -469,14 +633,25 @@ class MainWindow(QMainWindow):
                 f"모델명 근거: {self._cell_text(self.preview_table, row, 5)}",
                 f"오류 예상: {self._cell_text(self.preview_table, row, 6)}",
             ]
-            self.selection_detail.setPlainText("\n".join(lines))
+            if preview_item is not None:
+                if preview_item.mobile_output_enabled and preview_item.mobile_output_path:
+                    lines.append(f"모바일 출력 경로: {preview_item.mobile_output_path}")
+                elif preview_item.media_type == "video":
+                    lines.append("모바일 출력: 영상 파일은 생성하지 않음")
+                else:
+                    lines.append("모바일 출력: 사용 안 함")
+            self._set_selection_detail_text("\n".join(lines))
+            self._set_selection_metadata(preview_item.metadata_entries if preview_item is not None else [])
             return
         if table_name == "results":
             selected_items = self.results_table.selectedItems()
             if not selected_items:
-                self.selection_detail.setPlainText("실행 결과 항목을 선택하면 전체 원본 경로와 대상 경로를 여기서 확인할 수 있습니다.")
+                self._set_selection_detail_text("실행 결과 항목을 선택하면 전체 원본 경로와 대상 경로를 여기서 확인할 수 있습니다.")
+                self._set_selection_metadata([])
                 return
             row = selected_items[0].row()
+            result_item = self.last_execution_bundle.execution_results[row] if self.last_execution_bundle and row < len(self.last_execution_bundle.execution_results) else None
+            preview_item = self.last_execution_bundle.preview_items[row] if self.last_execution_bundle and row < len(self.last_execution_bundle.preview_items) else None
             lines = [
                 f"상태: {self._cell_text(self.results_table, row, 0)}",
                 f"동작: {self._cell_text(self.results_table, row, 1)}",
@@ -485,23 +660,33 @@ class MainWindow(QMainWindow):
                 f"대상 경로: {self._cell_text(self.results_table, row, 4)}",
                 f"메시지: {self._cell_text(self.results_table, row, 5)}",
             ]
-            self.selection_detail.setPlainText("\n".join(lines))
+            if result_item is not None:
+                if result_item.mobile_output_path:
+                    lines.append(f"모바일 출력 경로: {result_item.mobile_output_path}")
+                    lines.append(f"모바일 출력 상태: {result_item.mobile_output_status or '-'}")
+                else:
+                    lines.append("모바일 출력: 생성 안 함")
+            self._set_selection_detail_text("\n".join(lines))
+            self._set_selection_metadata(preview_item.metadata_entries if preview_item is not None else [])
             return
         if table_name == "error":
             selected_items = self.error_table.selectedItems()
             if not selected_items:
-                self.selection_detail.setPlainText("오류 항목을 선택하면 전체 원본 경로와 오류 내용을 여기서 확인할 수 있습니다.")
+                self._set_selection_detail_text("오류 항목을 선택하면 전체 원본 경로와 오류 내용을 여기서 확인할 수 있습니다.")
+                self._set_selection_metadata([])
                 return
             row = selected_items[0].row()
             lines = [
                 f"원본 경로: {self._cell_text(self.error_table, row, 0)}",
                 f"오류 내용: {self._cell_text(self.error_table, row, 1)}",
             ]
-            self.selection_detail.setPlainText("\n".join(lines))
+            self._set_selection_detail_text("\n".join(lines))
+            self._set_selection_metadata([])
             return
         selected_items = self.delete_table.selectedItems()
         if not selected_items:
-            self.selection_detail.setPlainText("삭제 리뷰 항목을 선택하면 전체 삭제 대상 경로와 사유를 여기서 확인할 수 있습니다.")
+            self._set_selection_detail_text("삭제 리뷰 항목을 선택하면 전체 삭제 대상 경로와 사유를 여기서 확인할 수 있습니다.")
+            self._set_selection_metadata([])
             return
         row = selected_items[0].row()
         checkbox = self.delete_table.cellWidget(row, 0)
@@ -511,7 +696,8 @@ class MainWindow(QMainWindow):
             f"삭제 대상 경로: {self._cell_text(self.delete_table, row, 1)}",
             f"사유: {self._cell_text(self.delete_table, row, 2)}",
         ]
-        self.selection_detail.setPlainText("\n".join(lines))
+        self._set_selection_detail_text("\n".join(lines))
+        self._set_selection_metadata([])
 
     def _update_preview_image(self, table_name: str) -> None:
         source_path = self._selected_image_source_path(table_name)
@@ -520,12 +706,22 @@ class MainWindow(QMainWindow):
             if table_name == "delete":
                 self._set_preview_image_placeholder("삭제 리뷰에서는 원본 이미지 미리보기를 표시하지 않습니다.")
             else:
-                self._set_preview_image_placeholder("사진 파일을 선택하면 축소 미리보기가 표시됩니다. 비사진/영상은 미리보기 불가입니다.")
+                self._set_preview_image_placeholder("사진은 축소 미리보기, 영상은 썸네일 미리보기가 표시됩니다.")
             return
         path = Path(source_path)
         if not path.exists() or not path.is_file():
             self._current_preview_source_path = None
             self._set_preview_image_placeholder("선택한 파일을 찾을 수 없습니다.")
+            self.preview_image_info.setText(str(path))
+            return
+        target_size = self.preview_image_scroll.viewport().size()
+        if target_size.width() < 240 or target_size.height() < 180:
+            target_size = QSize(640, 420)
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            if self._load_video_thumbnail(path, target_size):
+                return
+            self._current_preview_source_path = None
+            self._set_preview_image_placeholder("영상 썸네일을 추출하지 못했습니다. ffmpeg가 없거나 지원되지 않는 영상일 수 있습니다.")
             self.preview_image_info.setText(str(path))
             return
         reader = QImageReader(str(path))
@@ -535,9 +731,6 @@ class MainWindow(QMainWindow):
             self._set_preview_image_placeholder("비사진/영상 또는 지원되지 않는 이미지 형식이라 미리보기할 수 없습니다.")
             self.preview_image_info.setText(str(path))
             return
-        target_size = self.preview_image_scroll.viewport().size()
-        if target_size.width() < 240 or target_size.height() < 180:
-            target_size = QSize(640, 420)
         source_size = reader.size()
         if source_size.isValid() and source_size.width() > 0 and source_size.height() > 0:
             scaled_size = source_size.scaled(target_size, Qt.KeepAspectRatio)
@@ -554,6 +747,24 @@ class MainWindow(QMainWindow):
         self.preview_image_view.setPixmap(pixmap)
         self.preview_image_view.setText("")
         self.preview_image_info.setText(f"{path.name} | {image.width()} x {image.height()} | 축소 로드")
+
+    def _load_video_thumbnail(self, path: Path, target_size: QSize) -> bool:
+        max_width = max(240, target_size.width())
+        cache_key = (str(path.resolve()), max_width)
+        pixmap = self._video_thumbnail_cache.get(cache_key)
+        if pixmap is None:
+            thumbnail_bytes = extract_video_thumbnail_bytes(path, max_width=max_width)
+            if not thumbnail_bytes:
+                return False
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(thumbnail_bytes, "PNG"):
+                return False
+            self._video_thumbnail_cache[cache_key] = pixmap
+        self._current_preview_source_path = path
+        self.preview_image_view.setPixmap(pixmap)
+        self.preview_image_view.setText("")
+        self.preview_image_info.setText(f"{path.name} | 영상 썸네일")
+        return True
 
     def _selected_image_source_path(self, table_name: str) -> str:
         if table_name == "preview":
@@ -578,6 +789,22 @@ class MainWindow(QMainWindow):
         self.preview_image_view.setText(text)
         self.preview_image_info.setText(text)
 
+    def _set_selection_detail_text(self, text: str) -> None:
+        self.selection_detail.setPlainText(text)
+
+    def _set_selection_metadata(self, entries: list[tuple[str, str]]) -> None:
+        rows = entries or [("메타정보", "메타정보 없음")]
+        self.selection_metadata_table.setRowCount(len(rows))
+        for row, (label, value) in enumerate(rows):
+            label_text = label or "-"
+            value_text = value or "-"
+            label_item = QTableWidgetItem(label_text)
+            value_item = QTableWidgetItem(value_text)
+            label_item.setToolTip(label_text)
+            value_item.setToolTip(value_text)
+            self.selection_metadata_table.setItem(row, 0, label_item)
+            self.selection_metadata_table.setItem(row, 1, value_item)
+
     def _cell_text(self, table: QTableWidget, row: int, column: int) -> str:
         item = table.item(row, column)
         return item.text() if item is not None else "-"
@@ -599,6 +826,7 @@ class MainWindow(QMainWindow):
         self.preview_button.setEnabled(not busy)
         self.execute_button.setEnabled(not busy)
         self.delete_button.setEnabled(not busy and bool(self.current_delete_candidates))
+        self.settings_button.setEnabled(not busy)
         QApplication.processEvents()
 
     def _update_progress(self, message: str, current: int, total: int) -> None:
