@@ -139,6 +139,8 @@ class MainWindow(QMainWindow):
         self.last_execution_bundle: ExecutionBundle | None = None
         self._current_preview_source_path: Path | None = None
         self._video_thumbnail_cache: dict[tuple[str, int], QPixmap] = {}
+        self._detail_metadata_cache: dict[str, list[tuple[str, str]]] = {}
+        self._results_detail_column = 3
 
         self.setWindowTitle(f"PhotoOrganizer {__version__}")
         self.resize(1400, 860)
@@ -219,7 +221,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.tabs)
 
         self.preview_table = self._build_table(["원본 경로", "대상 경로", "처리 방식", "새 파일명", "일시 근거", "모델명 근거", "오류 예상"])
-        self.results_table = self._build_table(["상태", "동작", "처리 방식", "원본", "대상", "메시지"])
+        self.results_table = self._build_table(["상태", "동작", "처리 방식", "원본", "대상", "모바일 출력", "모바일 출력 경로", "메시지"])
         self.error_table = self._build_table(["원본 경로", "오류 내용"])
         self.delete_table = self._build_delete_table()
 
@@ -240,6 +242,7 @@ class MainWindow(QMainWindow):
 
         self.preview_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("preview"))
         self.results_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("results"))
+        self.results_table.itemClicked.connect(self._handle_results_item_clicked)
         self.error_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("error"))
         self.delete_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("delete"))
         self.tabs.currentChanged.connect(self._handle_tab_changed)
@@ -366,6 +369,8 @@ class MainWindow(QMainWindow):
             "처리 방식": 120,
             "원본": 520,
             "대상": 620,
+            "모바일 출력": 120,
+            "모바일 출력 경로": 620,
             "메시지": 260,
             "오류 내용": 420,
         }
@@ -573,7 +578,21 @@ class MainWindow(QMainWindow):
         self.results_table.setRowCount(start_row + len(items))
         for offset, item in enumerate(items):
             row = start_row + offset
-            values = [item.status, item.action, self._write_mode_label(item.write_mode), item.source_path, item.target_path, item.message]
+            mobile_output_label = "생성 안 함"
+            mobile_output_path = "-"
+            if item.mobile_output_path:
+                mobile_output_path = item.mobile_output_path
+                mobile_output_label = "실패" if item.mobile_output_status == "ERROR" else "생성됨"
+            values = [
+                item.status,
+                item.action,
+                self._write_mode_label(item.write_mode),
+                item.source_path,
+                item.target_path,
+                mobile_output_label,
+                mobile_output_path,
+                item.message,
+            ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(value)
@@ -614,6 +633,11 @@ class MainWindow(QMainWindow):
         elif current is self.delete_table:
             self._update_selection_detail("delete")
 
+    def _handle_results_item_clicked(self, item: QTableWidgetItem) -> None:
+        if item.column() in (3, 4, 6):
+            self._results_detail_column = item.column()
+        self._update_selection_detail("results")
+
     def _update_selection_detail(self, table_name: str) -> None:
         self._update_preview_image(table_name)
         if table_name == "preview":
@@ -651,23 +675,25 @@ class MainWindow(QMainWindow):
                 return
             row = selected_items[0].row()
             result_item = self.last_execution_bundle.execution_results[row] if self.last_execution_bundle and row < len(self.last_execution_bundle.execution_results) else None
-            preview_item = self.last_execution_bundle.preview_items[row] if self.last_execution_bundle and row < len(self.last_execution_bundle.preview_items) else None
+            detail_path, detail_kind = self._results_detail_target(row)
             lines = [
                 f"상태: {self._cell_text(self.results_table, row, 0)}",
                 f"동작: {self._cell_text(self.results_table, row, 1)}",
                 f"처리 방식: {self._cell_text(self.results_table, row, 2)}",
                 f"원본 경로: {self._cell_text(self.results_table, row, 3)}",
                 f"대상 경로: {self._cell_text(self.results_table, row, 4)}",
-                f"메시지: {self._cell_text(self.results_table, row, 5)}",
+                f"모바일 출력 상태: {self._cell_text(self.results_table, row, 5)}",
+                f"모바일 출력 경로: {self._cell_text(self.results_table, row, 6)}",
+                f"메시지: {self._cell_text(self.results_table, row, 7)}",
             ]
+            lines.append(f"상세 기준: {detail_kind}")
             if result_item is not None:
                 if result_item.mobile_output_path:
-                    lines.append(f"모바일 출력 경로: {result_item.mobile_output_path}")
-                    lines.append(f"모바일 출력 상태: {result_item.mobile_output_status or '-'}")
+                    lines.append(f"모바일 출력 처리 결과: {result_item.mobile_output_status or '-'}")
                 else:
                     lines.append("모바일 출력: 생성 안 함")
             self._set_selection_detail_text("\n".join(lines))
-            self._set_selection_metadata(preview_item.metadata_entries if preview_item is not None else [])
+            self._set_selection_metadata(self._metadata_entries_for_path(detail_path))
             return
         if table_name == "error":
             selected_items = self.error_table.selectedItems()
@@ -771,8 +797,11 @@ class MainWindow(QMainWindow):
             table = self.preview_table
             column = 0
         elif table_name == "results":
-            table = self.results_table
-            column = 3
+            row, _detail_kind = self._selected_results_row()
+            if row is None:
+                return ""
+            path, _detail_kind = self._results_detail_target(row)
+            return str(path) if path is not None else ""
         elif table_name == "error":
             table = self.error_table
             column = 0
@@ -783,6 +812,44 @@ class MainWindow(QMainWindow):
             return ""
         row = selected_items[0].row()
         return self._cell_text(table, row, column)
+
+    def _selected_results_row(self) -> tuple[int | None, str]:
+        selected_items = self.results_table.selectedItems()
+        if not selected_items:
+            return None, "원본 파일"
+        kind_map = {
+            3: "원본 파일",
+            4: "대상 파일",
+            6: "모바일 출력 파일",
+        }
+        return selected_items[0].row(), kind_map.get(self._results_detail_column, "원본 파일")
+
+    def _results_detail_target(self, row: int) -> tuple[Path | None, str]:
+        if self._results_detail_column == 6:
+            mobile_output_text = self._cell_text(self.results_table, row, 6)
+            if mobile_output_text and mobile_output_text != "-":
+                return Path(mobile_output_text), "모바일 출력 파일"
+            self._results_detail_column = 4
+        if self._results_detail_column == 4:
+            target_text = self._cell_text(self.results_table, row, 4)
+            if target_text and target_text != "-":
+                return Path(target_text), "대상 파일"
+            self._results_detail_column = 3
+        source_text = self._cell_text(self.results_table, row, 3)
+        if source_text and source_text != "-":
+            return Path(source_text), "원본 파일"
+        return None, "원본 파일"
+
+    def _metadata_entries_for_path(self, path: Path | None) -> list[tuple[str, str]]:
+        if path is None:
+            return []
+        cache_key = str(path)
+        cached = self._detail_metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        entries = self.engine.describe_media_path(path)
+        self._detail_metadata_cache[cache_key] = entries
+        return entries
 
     def _set_preview_image_placeholder(self, text: str) -> None:
         self.preview_image_view.setPixmap(QPixmap())

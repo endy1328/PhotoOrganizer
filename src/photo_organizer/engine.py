@@ -195,6 +195,15 @@ class OrganizerEngine:
             )
         return results
 
+    def describe_media_path(self, path: Path) -> list[tuple[str, str]]:
+        if not path.exists() or not path.is_file():
+            return []
+        try:
+            item = self.extractor.extract(path)
+        except Exception:
+            return []
+        return self._build_metadata_entries(item)
+
     def _scan_media_files(self, source_path: Path, target_path: Path | None = None) -> list[Path]:
         source_resolved = source_path.resolve()
         target_resolved = target_path.resolve() if target_path else None
