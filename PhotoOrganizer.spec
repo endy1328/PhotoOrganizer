@@ -1,6 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.win32.versioninfo import FixedFileInfo, StringFileInfo, StringTable, StringStruct, VarFileInfo, VarStruct, VSVersionInfo
+from pathlib import Path
+import runpy
+
+release = runpy.run_path(str(Path(SPECPATH) / "src" / "photo_organizer" / "__init__.py"))
+app_version = release["__version__"]
+version_tuple = tuple(map(int, app_version.split(".")))
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=version_tuple, prodvers=version_tuple, mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+    kids=[
+        StringFileInfo([StringTable("040904B0", [
+            StringStruct("FileDescription", "PhotoOrganizer"),
+            StringStruct("FileVersion", app_version),
+            StringStruct("ProductName", "PhotoOrganizer"),
+            StringStruct("ProductVersion", app_version),
+            StringStruct("Comments", f"수정날짜: {release['__release_date__']}"),
+        ])]),
+        VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
+    ],
+)
 
 hiddenimports = collect_submodules("PIL")
 
@@ -8,7 +28,7 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[(str(Path(SPECPATH) / "src" / "photo_organizer" / "resources" / "phone_wpd.cs"), "photo_organizer/resources")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -25,6 +45,7 @@ exe = EXE(
     a.datas,
     [],
     name="PhotoOrganizer",
+    version=version_info,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

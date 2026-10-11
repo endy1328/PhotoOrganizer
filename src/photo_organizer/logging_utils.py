@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from .models import LogEvent
 
@@ -25,7 +26,8 @@ class AppLogger:
 
     def write_session_log(self, events: list[LogEvent]) -> Path:
         self.cleanup_old_logs()
-        log_path = self.logs_dir / f"run_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
+        log_path = self.logs_dir / f"run_{datetime.now():%Y%m%d_%H%M%S_%f}_{uuid4().hex}.jsonl"
         lines = [json.dumps(asdict(event), ensure_ascii=False) for event in events]
-        log_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        with log_path.open('x', encoding='utf-8') as stream:
+            stream.write("\n".join(lines) + ("\n" if lines else ""))
         return log_path

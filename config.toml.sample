@@ -1,9 +1,34 @@
 [app]
+video_encoder = "auto"
+conversion_speed = "balanced"
+photo_workers = 2
+restore_last_job = true
+autosave_job_changes = true
 source_path = "C:\\source"
 target_path = "D:\\target"
 device_name_override = "GSX"
 operation_mode = "copy"
+video_model_window_minutes = 5
+phone_conflict_policy = "overwrite"
+# Exclude videos at or above this size only when copying to a phone.
+# Decimal MB: 1 MB = 1,000,000 bytes. Range: 1..1000000.
+phone_video_limit_enabled = false
+phone_video_limit_mb = 500
+model_mapping_scope = "filename_and_folders"
 mobile_output_enabled = true
+# Exclude photo/video output at or above the actual converted size (decimal MB).
+mobile_output_limit_enabled = false
+mobile_output_limit_mb = 500
 mobile_output_max_width = 3000
 mobile_output_jpeg_quality = 75
 mobile_output_keep_smaller_original = true
+mobile_output_video_max_width = 1280
+# very_high / high_plus / high / balanced / compact / small
+mobile_output_video_quality = "balanced"
+mobile_output_video_only_if_smaller = true
+
+# Original model names remain in extracted metadata. Aliases apply to output names.
+# Use "filename_only" above to preserve original model classification folders.
+[model_name_mappings]
+# "SM-F926N" = "Galaxy_Z_Fold3"
+# "DJI OsmoAction4" = "DJI_Action4"

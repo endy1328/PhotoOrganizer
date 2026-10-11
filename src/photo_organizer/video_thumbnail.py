@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from .process_utils import hidden_process_kwargs
 
 
 def extract_video_thumbnail_bytes(path: Path, max_width: int = 640, seek_seconds: int = 1) -> bytes | None:
@@ -25,7 +26,7 @@ def extract_video_thumbnail_bytes(path: Path, max_width: int = 640, seek_seconds
         "-",
     ]
     try:
-        result = subprocess.run(command, capture_output=True, check=True)
+        result = subprocess.run(command, capture_output=True, check=True, **hidden_process_kwargs())
     except Exception:
         return None
     return result.stdout or None

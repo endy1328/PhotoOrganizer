@@ -8,6 +8,7 @@ from typing import Any
 
 from .fallback import parse_filename_fallback, sanitize_model_name
 from .models import PHOTO_EXTENSIONS, MediaItem
+from .process_utils import hidden_process_kwargs
 
 try:
     import exifread  # type: ignore
@@ -62,12 +63,13 @@ class MetadataExtractor:
                 item.warnings.append(f"사진 메타 추출 실패(Pillow): {exc}")
 
     def _extract_video_metadata(self, item: MediaItem) -> None:
+        tools: dict[str, dict[str, str]] = {}
         try:
             result = subprocess.run(
                 [
                     "ffprobe",
                     "-v",
-                    "quiet",
+                    "error",
                     "-print_format",
                     "json",
                     "-show_format",
@@ -75,19 +77,53 @@ class MetadataExtractor:
                     str(item.source_path),
                 ],
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 check=True,
+                timeout=60,
+                **hidden_process_kwargs(),
             )
-            self._apply_ffprobe_metadata(item, json.loads(result.stdout))
-        except Exception as exc:
+            output = result.stdout
+            if not output or not output.strip():
+                raise ValueError("ffprobe JSON 출력이 없습니다. 실행 파일과 실행 환경을 확인하세요.")
+            if isinstance(output, bytes):
+                output = output.decode("utf-8-sig", errors="replace")
+            try:
+                data = json.loads(output)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"ffprobe JSON 해석 실패: {exc}") from exc
+            if not isinstance(data, dict):
+                raise ValueError("ffprobe JSON 최상위 값이 객체가 아닙니다.")
+            self._apply_ffprobe_metadata(item, data)
+            tools["ffprobe"] = {"status": "success", "detail": ""}
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr or b""
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="replace")
+            message = f"종료 코드 {exc.returncode}; {detail.strip()[:500]}"
+            tools["ffprobe"] = {"status": "error", "detail": message}
+            item.warnings.append(f"영상 메타 추출 실패(ffprobe): {message}")
+        except FileNotFoundError as exc:
+            tools["ffprobe"] = {"status": "unavailable", "detail": str(exc)}
             item.warnings.append(f"영상 메타 추출 실패(ffprobe): {exc}")
-        if (item.captured_at is None or not item.model_name) and MediaInfo is not None:
+        except Exception as exc:
+            tools["ffprobe"] = {"status": "error", "detail": str(exc)}
+            item.warnings.append(f"영상 메타 추출 실패(ffprobe): {exc}")
+        if item.captured_at is not None and item.model_name:
+            tools["mediainfo"] = {"status": "not_needed", "detail": "ffprobe에서 일시와 모델명을 확인함"}
+        elif MediaInfo is None:
+            tools["mediainfo"] = {"status": "unavailable", "detail": "pymediainfo를 사용할 수 없음"}
+        else:
             try:
                 self._apply_mediainfo(item, MediaInfo.parse(str(item.source_path)).to_data())
+                tools["mediainfo"] = {"status": "success", "detail": ""}
             except Exception as exc:
+                tools["mediainfo"] = {"status": "error", "detail": str(exc)}
                 item.warnings.append(f"영상 메타 추출 실패(pymediainfo): {exc}")
+        # 원본에서 직접 확인한 값만 기록한다. 이후 파일명/사진/사용자 보완과 분리한다.
+        direct_model = item.metadata.get("display_metadata", {}).get("video_model")
+        status = "found" if direct_model else "not_found" if any(
+            tool["status"] == "success" for tool in tools.values()
+        ) else "failed"
+        item.metadata["video_model_lookup"] = {"status": status, "model": direct_model, "tools": tools}
 
     def _apply_filename_fallback(self, item: MediaItem) -> None:
         fallback_at, fallback_model, fallback_source = parse_filename_fallback(item.source_path.name)
@@ -207,22 +243,32 @@ class MetadataExtractor:
         creation_time = tags.get("creation_time") or tags.get("com.apple.quicktime.creationdate") or tags.get("date")
         if creation_time:
             self._set_display_metadata(item, "video_creation_time", str(creation_time))
-        model = tags.get("com.apple.quicktime.model") or tags.get("model")
-        if model and "unknown" not in str(model).lower():
+        # 빈 값/UNKNOWN 컨테이너 태그가 유효한 스트림 모델을 가리지 않도록 따로 탐색한다.
+        model = _find_video_model([
+            format_info.get("tags", {}) or {},
+            *(stream.get("tags", {}) or {} for stream in streams),
+        ])
+        if model:
             item.model_name = sanitize_model_name(str(model))
             item.model_source = "영상 메타"
             self._set_display_metadata(item, "video_model", str(model))
 
     def _apply_mediainfo(self, item: MediaItem, data: dict[str, Any]) -> None:
         snapshot: list[dict[str, Any]] = []
-        for track in data.get("tracks", []):
+        tracks = data.get("tracks", [])
+        model = _find_video_model(tracks)
+        if model and (not item.model_name or item.model_name == "UNKNOWN"):
+            item.model_name = sanitize_model_name(str(model))
+            item.model_source = "영상 메타"
+            self._set_display_metadata(item, "video_model", str(model))
+        for track in tracks:
             snapshot.append(
                 {
                     "track_type": track.get("@type") or track.get("track_type") or "",
                     "encoded_date": track.get("encoded_date"),
                     "tagged_date": track.get("tagged_date"),
                     "recorded_date": track.get("recorded_date"),
-                    "model": track.get("model"),
+                    "model": _find_video_model([track]),
                 }
             )
             parsed = _parse_video_datetime(
@@ -231,11 +277,6 @@ class MetadataExtractor:
             if parsed and item.captured_at is None:
                 item.captured_at = parsed
                 item.datetime_source = "영상 메타"
-            model = track.get("model")
-            if model and not item.model_name:
-                item.model_name = sanitize_model_name(str(model))
-                item.model_source = "영상 메타"
-                self._set_display_metadata(item, "video_model", str(model))
             if (track.get("@type") or track.get("track_type")) == "Video":
                 width = track.get("width")
                 height = track.get("height")
@@ -275,6 +316,32 @@ class MetadataExtractor:
         metadata[key] = _freeze_metadata_value(value)
 
 
+def _find_video_model(sources: list[dict[str, Any]]) -> str | None:
+    """명시적 모델 태그 우선. 실제 파일에서 확인된 기기 encoder만 보조로 허용한다."""
+    keys = (
+        "com.apple.quicktime.model", "model", "camera_model", "device_model",
+        "recorded_hardware_model_name",
+    )
+    for source in sources:
+        normalized = {str(key).casefold(): value for key, value in source.items()}
+        for key in keys:
+            value = normalized.get(key)
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            if value and "unknown" not in value.casefold() and sanitize_model_name(value) != "UNKNOWN":
+                return value
+    # An encoder usually names software. Accept only verified, exact device identities.
+    verified_encoders = {"djiosmoaction4": "DJI OsmoAction4"}
+    for source in sources:
+        for key, value in source.items():
+            if str(key).casefold() == "encoder" and isinstance(value, str):
+                model = verified_encoders.get("".join(value.split()).casefold())
+                if model:
+                    return model
+    return None
+
+
 def _parse_exif_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -289,7 +356,10 @@ def _parse_video_datetime(value: str | None) -> datetime | None:
         return None
     cleaned = str(value).replace("UTC ", "").replace("Z", "+00:00").strip()
     try:
-        return datetime.fromisoformat(cleaned).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(cleaned)
+        if parsed.tzinfo is not None:
+            return parsed.astimezone().replace(tzinfo=None)
+        return parsed
     except ValueError:
         pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):

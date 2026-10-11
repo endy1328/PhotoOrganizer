@@ -21,6 +21,22 @@ class AppSettings:
     mobile_output_max_width: int = 3000
     mobile_output_jpeg_quality: int = 75
     mobile_output_keep_smaller_original: bool = True
+    mobile_output_video_max_width: int = 1280
+    mobile_output_video_quality: str = "balanced"
+    mobile_output_video_only_if_smaller: bool = True
+    mobile_output_limit_enabled: bool = False
+    mobile_output_limit_mb: int = 500
+    video_model_window_minutes: int = 5
+    phone_conflict_policy: str = "overwrite"
+    phone_video_limit_enabled: bool = False
+    phone_video_limit_mb: int = 500
+    model_name_mappings: dict[str, str] = field(default_factory=dict)
+    model_mapping_scope: str = "filename_and_folders"
+    restore_last_job: bool = True
+    autosave_job_changes: bool = True
+    video_encoder: str = "auto"
+    conversion_speed: str = "balanced"
+    photo_workers: int = 2
 
 
 @dataclass(slots=True)
@@ -34,6 +50,17 @@ class OrganizeRequest:
     mobile_output_max_width: int = 3000
     mobile_output_jpeg_quality: int = 75
     mobile_output_keep_smaller_original: bool = True
+    mobile_output_video_max_width: int = 1280
+    mobile_output_video_quality: str = "balanced"
+    mobile_output_video_only_if_smaller: bool = True
+    mobile_output_limit_enabled: bool = False
+    mobile_output_limit_mb: int = 500
+    video_model_window_minutes: int = 5
+    model_name_mappings: dict[str, str] = field(default_factory=dict)
+    model_mapping_scope: str = "filename_and_folders"
+    video_encoder: str = "auto"
+    conversion_speed: str = "balanced"
+    photo_workers: int = 2
 
 
 @dataclass(slots=True)
@@ -71,6 +98,10 @@ class PreviewItem:
     mobile_output_enabled: bool = False
     mobile_output_path: str = ""
     status: str = "READY"
+    filename_edited: bool = False
+    included: bool = True
+    output_model_name: str = ""
+    folder_model_name: str = ""
 
 
 @dataclass(slots=True)
@@ -90,6 +121,7 @@ class ExecutionResult:
     message: str = ""
     mobile_output_path: str = ""
     mobile_output_status: str = ""
+    mobile_output_message: str = ""
 
 
 @dataclass(slots=True)
@@ -113,6 +145,10 @@ class PreviewBundle:
     preview_items: list[PreviewItem] = field(default_factory=list)
     error_items: list[ErrorItem] = field(default_factory=list)
     log_events: list[LogEvent] = field(default_factory=list)
+    media_items: list[MediaItem] = field(default_factory=list)
+    selection_applied: bool = False
+    model_name_mappings: dict[str, str] = field(default_factory=dict)
+    model_mapping_scope: str = "filename_and_folders"
 
 
 @dataclass(slots=True)
