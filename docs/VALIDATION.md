@@ -7,6 +7,7 @@
 - `.agents/skills/uncodixfy`와 두 중복 설치의 파일 해시 차이는0이며 canonical 공유 skill/라이선스·공개 skills-lock과 config.toml.sample은 유지한다. 신규 소스·테스트·설계 문서가 정상적인 untracked 후보로 나타난다.
 - origin은 PhotoOrganizer 저장소다. remote20261012 미존재,local20261012=현재HEAD8ae2593 및 좌우0/0 확인. 직전567개 전체 회귀565통과/2skip와1.0.1.17 EXE 검증 로그 확인. 앱 코드/버전 변경 없이 추적 정책과 문서만 갱신한다.
 - ignore 유지/제외43개 경로 사례 검증. index241개를 정확한 NUL manifest로 cached 제거했고 모두 로컬 크기/mtime 불변을 확인했다. 깨끗한 source index157개,ignored tracked0개,예상 밖 untracked0개다. Python source/tests 구문 및 source/test/docs의 staged diff 공백 검증 통과. vendored skill README의 기존 Markdown hard-break 공백은 그대로 유지한다.
+- source commit a99beac73c9ba34d2979ae7e051cdaba0cd9f685를 origin/20261012 새 브랜치로 push했다. ls-remote의 실제 해시가 로컬HEAD와 일치하며 HEAD...origin/20261012=0/0,git status clean,ignored tracked0개를 확인했다. 로컬20261012는 origin/20261012를 추적한다. 완료 검증 기록은 후속 문서 커밋에 포함한다.
 
 ## 2026-10-12 실행 확인과 진행 상세 / 1.0.1.17
 

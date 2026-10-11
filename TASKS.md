@@ -5,7 +5,7 @@
 - DONE 실제 파일/HEAD/index 감사, 잘못된 문서 제외 제거 및 버전별 빌드·런타임·임시·캡처 규칙 보완.
 - 확인한 제외 대상: index241개(새로 staged된 산출물 포함), HEAD129개(캐시107/패키지 메타6/중복 설치16). 로컬 파일은 보존한다.
 - DONE cached241개 제외/로컬 크기·mtime 보존,source index157개 및ignore43사례 검증. 앱 버전은1.0.1.17 유지.
-- 진행 중 사용자 요청 `origin/20261012` commit/push 및 원격 해시 확인.
+- DONE 사용자 요청 `origin/20261012` commit/push, 원격 source commit a99beac와 로컬 일치/좌우0·0/작업 상태 clean 확인. 완료 기록도 같은 브랜치에 반영한다.
 
 ## 실행 확인과 진행 상세 (2026-10-12)
 
