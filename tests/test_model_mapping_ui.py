@@ -17,6 +17,9 @@ from photo_organizer.ui.model_selection import ModelSelectionPanel
 
 class ModelMappingUiTests(unittest.TestCase):
     def setUp(self):
+        confirmation = patch('photo_organizer.ui.execution_controller.ExecutionConfirmDialog.exec', return_value=1)
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
         for method in ("_confirm_job_transition", "_restore_recent_job", "_autosave_job"):
             fixture=patch(f"photo_organizer.ui.main_window.MainWindow.{method}",new=(lambda self: True) if method == "_confirm_job_transition" else (lambda self: None),create=True)
             fixture.start()

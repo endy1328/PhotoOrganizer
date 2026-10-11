@@ -1,8 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QCloseEvent, QImageReader, QPixmap
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QCloseEvent, QImageReader, QPixmap, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -25,11 +25,11 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +42,8 @@ from ..video_thumbnail import extract_video_thumbnail_bytes
 from .model_selection import ModelSelectionPanel
 from .job_controller import JobControllerMixin
 from .operation_controller import OperationControllerMixin
+from .responsive_layout import FlowLayout, ElidedLabel
+from .dock_panels import DockPanelsMixin
 from ..operation_control import OperationStopped
 from ..model_mapping import model_mapping_signature
 from ..video_output import VIDEO_QUALITY_PRESETS, normalize_video_quality, video_quality_display_label
@@ -65,8 +67,9 @@ class SettingsDialog(QDialog):
     ]
     VIDEO_QUALITY_OPTIONS = [(video_quality_display_label(key), key) for key in VIDEO_QUALITY_PRESETS]
 
-    def __init__(self, parent: QWidget | None, settings: AppSettings) -> None:
+    def __init__(self, parent: QWidget | None, settings: AppSettings, read_only: bool = False) -> None:
         super().__init__(parent)
+        self._read_only = read_only
         self.setWindowTitle("환경설정")
         self.setModal(True)
         self.resize(700, 620)
@@ -278,19 +281,34 @@ class SettingsDialog(QDialog):
         self.enabled_checkbox.toggled.connect(self._sync_enabled_state)
         self._sync_enabled_state(self.enabled_checkbox.isChecked())
         self._processing_locked = bool(parent and getattr(parent, "_job_started", lambda: False)())
-        if self._processing_locked:
+        if self._processing_locked and not read_only:
             for widget in (mapping_group, inference_group, self.enabled_checkbox,
                            output_size_group, photo_group, video_group, self.performance_group):
                 widget.setEnabled(False)
             locked_note = QLabel("실행을 시작한 작업의 처리 설정은 고정됩니다. 변경하려면 새 작업을 시작해주세요. 휴대폰 복사와 작업 복원 설정은 변경할 수 있습니다.")
             locked_note.setWordWrap(True)
             layout.addWidget(locked_note)
+        if read_only:
+            self.setWindowTitle('환경설정 — 실행에 적용된 설정 (읽기 전용)')
+            note = QLabel('진행 중인 작업에 적용된 설정입니다. 작업 중에는 변경할 수 없습니다.')
+            note.setWordWrap(True)
+            dialog_layout.insertWidget(0, note)
+            for widget in content.findChildren(QWidget):
+                if isinstance(widget, (QCheckBox, QComboBox, QSpinBox, QLineEdit, QPushButton)):
+                    widget.setEnabled(False)
+            self.mapping_table.setEnabled(True)
+            self.mapping_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            buttons.setStandardButtons(QDialogButtonBox.Close)
+            restore_button.hide()
+            restore_button.setEnabled(False)
 
     def _update_video_quality_description(self, *_args) -> None:
         key = normalize_video_quality(self.video_quality_combo.currentData())
         self.video_quality_description.setText(VIDEO_QUALITY_PRESETS[key]["description"])
 
     def _restore_defaults(self) -> None:
+        if self._read_only:
+            return
         if getattr(self, "_processing_locked", False):
             self._set_combo_value(self.phone_conflict_combo, "overwrite")
             self.phone_video_limit_checkbox.setChecked(False)
@@ -365,6 +383,8 @@ class SettingsDialog(QDialog):
         super().accept()
 
     def to_settings(self, current: AppSettings) -> AppSettings:
+        if self._read_only:
+            raise ValueError('읽기 전용 설정은 적용할 수 없습니다.')
         return AppSettings(
             video_encoder=str(self.video_encoder_combo.currentData()),
             conversion_speed=str(self.conversion_speed_combo.currentData()),
@@ -393,7 +413,10 @@ class SettingsDialog(QDialog):
         )
 
 
-class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
+from .execution_controller import ExecutionControllerMixin
+
+
+class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerMixin, JobControllerMixin, QMainWindow):
     def __init__(self, engine: OrganizerEngine, config_manager: ConfigManager) -> None:
         super().__init__()
         self.engine = engine
@@ -411,8 +434,18 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self._preview_metadata_fingerprints: dict[str, tuple[int, int] | None] = {}
         self._results_detail_column = 3
         self._busy = False
+        self._busy_read_worker = None
+        self._busy_read_pending = None
+        self._busy_read_token = 0
+        self._busy_read_current_key = None
+        self._busy_read_close_pending = False
+        self._busy_detail_metadata_cache = {}
+        self._busy_settings_dialog = None
+        self._short_workspace = False
+        self._details_auto_restore = False
         self._init_job_controller()
         self._init_operation_controller()
+        self._init_execution_controller()
 
         self.setWindowTitle(f"PhotoOrganizer {__version__} ({__release_date__})")
         self.resize(1400, 860)
@@ -425,11 +458,29 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         for line_edit in (self.source_edit, self.target_edit, self.device_name_edit):
             line_edit.textChanged.connect(lambda _text: self._job_mark_changed())
         self._restore_recent_job()
+        self._update_workspace_mode()
+        from .view_preferences import ViewPreferences
+        preferences_path = (self.config_manager.base_dir / 'view_preferences.json'
+                            if isinstance(self.config_manager, ConfigManager) else None)
+        self._view_preferences = ViewPreferences(self, preferences_path)
+        self._view_preferences.restore()
+        self._update_workspace_mode(force_compact=True)
 
     def _build_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(6)
+        self.setFont(QFont('Malgun Gothic', 10))
+        self.setStyleSheet('''
+            QMainWindow, QWidget { color: #212529; }
+            QLineEdit, QPlainTextEdit, QTableWidget { background: #ffffff; }
+            QPushButton, QToolButton { padding: 3px 8px; }
+            QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid #0066cc; }
+            QPushButton:disabled, QToolButton:disabled { color: #85898e; }
+            QHeaderView::section { background: #f3f4f5; padding: 4px; border: 0; border-bottom: 1px solid #d5d8dc; }
+        ''')
 
         form_layout = QFormLayout()
         self.source_edit = QLineEdit()
@@ -450,9 +501,11 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         target_button.clicked.connect(lambda: self._select_directory(self.target_edit))
 
         source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 0, 0, 0)
         source_row.addWidget(self.source_edit)
         source_row.addWidget(source_button)
         target_row = QHBoxLayout()
+        target_row.setContentsMargins(0, 0, 0, 0)
         target_row.addWidget(self.target_edit)
         target_row.addWidget(target_button)
 
@@ -463,16 +516,30 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
 
         form_layout.addRow("Source 경로", source_wrapper)
         form_layout.addRow("Target 경로", target_wrapper)
-        form_layout.addRow("디바이스명(선택)", self.device_name_edit)
-        self.device_name_hint = QLabel()
-        self.device_name_hint.setWordWrap(True)
-        form_layout.addRow("", self.device_name_hint)
-        form_layout.addRow("처리 모드", self.mode_combo)
         layout.addLayout(form_layout)
+        self.additional_options_panel = QWidget()
+        options_form = QFormLayout(self.additional_options_panel)
+        options_form.setContentsMargins(0, 0, 0, 0)
+        options_form.addRow("디바이스명(선택)", self.device_name_edit)
+        self.device_name_hint = ElidedLabel()
+        options_form.addRow("", self.device_name_hint)
+        options_form.addRow("처리 모드", self.mode_combo)
+        layout.addWidget(self.additional_options_panel)
+        self.additional_options_panel.hide()
+        self.additional_options_toggle = QToolButton()
+        self.additional_options_toggle.setText('추가 옵션')
+        self.additional_options_toggle.setCheckable(True)
+        self.additional_options_toggle.toggled.connect(self.additional_options_panel.setVisible)
+        self.mode_combo.currentTextChanged.connect(self._update_additional_options_state)
+        self.details_toggle = QToolButton()
+        self.details_toggle.setText('상세 보기')
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setChecked(True)
+        self.details_toggle.toggled.connect(self._set_details_visible)
 
         self._build_job_controls(layout)
 
-        button_row = QHBoxLayout()
+        button_row = FlowLayout()
         self.preview_button = QPushButton("미리보기")
         self.execute_button = QPushButton("실행")
         self.delete_button = QPushButton("삭제 리뷰 실행")
@@ -495,20 +562,23 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.phone_transfer_button = QPushButton("모바일로 복사")
         self.phone_transfer_button.clicked.connect(self._open_phone_transfer)
         button_row.addWidget(self.phone_transfer_button)
-        button_row.addStretch(1)
-        self.mobile_output_summary = QLabel()
-        self.mobile_output_summary.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.mobile_output_summary.setWordWrap(True)
+        self.mobile_output_summary = ElidedLabel()
+        self.mobile_output_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.mobile_output_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.settings_button = QPushButton("환경설정")
         self.settings_button.clicked.connect(self._open_settings_dialog)
-        button_row.addWidget(self.mobile_output_summary, 1)
         button_row.addWidget(self.settings_button)
         layout.addLayout(button_row)
+        layout.addWidget(self.mobile_output_summary)
 
-        self.status_label = QLabel("초기/미선택")
-        self.status_label.setWordWrap(True)
+        self.status_label = ElidedLabel("초기/미선택")
         layout.addWidget(self.status_label)
+        self.execution_summary_label = ElidedLabel()
+        self.execution_summary_label.hide()
+        layout.addWidget(self.execution_summary_label)
+        self.active_files_label = ElidedLabel()
+        self.active_files_label.hide()
+        layout.addWidget(self.active_files_label)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
@@ -516,11 +586,9 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.progress_bar.setFormat("대기 중")
         layout.addWidget(self.progress_bar)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        layout.addWidget(splitter, 1)
         self.tabs = QTabWidget()
-        splitter.addWidget(self.tabs)
+        self.tabs.setMinimumSize(0, 150)
+        layout.addWidget(self.tabs, 1)
 
         self.preview_table = self._build_table(["원본 경로", "대상 경로", "처리 방식", "새 파일명", "일시 근거", "모델명 근거", "안내/오류", "영상 모델 조회"])
         self.preview_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -542,15 +610,10 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.tabs.addTab(self.error_table, "오류")
         self.tabs.addTab(self.delete_table, "삭제 리뷰")
 
-        self.selection_splitter = QSplitter(Qt.Horizontal)
-        self.selection_splitter.setChildrenCollapsible(False)
         self.selection_image_panel = self._build_selection_image_panel()
         self.selection_detail_panel = self._build_selection_detail_panel()
-        self.selection_splitter.addWidget(self.selection_image_panel)
-        self.selection_splitter.addWidget(self.selection_detail_panel)
-        self.selection_splitter.setStretchFactor(0, 1)
-        self.selection_splitter.setStretchFactor(1, 2)
-        splitter.addWidget(self.selection_splitter)
+        self._build_dock_panels()
+        self._build_execution_progress(button_row)
 
         self.preview_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("preview"))
         self.preview_table.itemClicked.connect(self._handle_preview_item_clicked)
@@ -563,6 +626,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
     def _build_table(self, headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
+        table.verticalHeader().setDefaultSectionSize(26)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -583,30 +647,24 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        title = QLabel("선택 파일 이미지")
-        title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(title)
-
         self.preview_image_scroll = QScrollArea()
         self.preview_image_scroll.setWidgetResizable(True)
-        self.preview_image_scroll.setMinimumWidth(320)
-        self.preview_image_scroll.setMinimumHeight(220)
+        self.preview_image_scroll.setMinimumSize(120, 60)
 
         self.preview_image_view = QLabel()
         self.preview_image_view.setAlignment(Qt.AlignCenter)
         self.preview_image_view.setWordWrap(True)
-        self.preview_image_view.setMinimumSize(280, 200)
+        self.preview_image_view.setMinimumSize(80, 40)
         self.preview_image_view.setStyleSheet(
             "QLabel { border: 1px solid #9aa0a6; background: #1f1f1f; color: #d0d0d0; padding: 12px; }"
         )
         self.preview_image_scroll.setWidget(self.preview_image_view)
         layout.addWidget(self.preview_image_scroll, 1)
 
-        self.preview_image_info = QLabel("사진 파일은 축소 로드하고, 영상 파일은 썸네일을 추출해 표시합니다.")
-        self.preview_image_info.setWordWrap(True)
+        self.preview_image_info = ElidedLabel("사진 파일은 축소 로드하고, 영상 파일은 썸네일을 추출해 표시합니다.")
         self.preview_image_info.setStyleSheet("color: #666;")
         layout.addWidget(self.preview_image_info)
-        self._set_preview_image_placeholder("미리보기에서 사진을 선택하면 왼쪽에 이미지가 표시됩니다.")
+        self._set_preview_image_placeholder("목록에서 파일을 선택하면 이미지 영역에 미리보기가 표시됩니다.")
         return panel
 
     def _build_selection_detail_panel(self) -> QWidget:
@@ -615,19 +673,15 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        info_title = QLabel("선택 항목 정보")
-        info_title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(info_title)
+        self.detail_tabs = QTabWidget()
+        self.detail_tabs.setMinimumSize(80, 70)
+        layout.addWidget(self.detail_tabs, 1)
 
         self.selection_detail = QPlainTextEdit()
         self.selection_detail.setReadOnly(True)
         self.selection_detail.setPlaceholderText("선택한 항목의 전체 경로와 세부 내용이 여기에 표시됩니다.")
-        self.selection_detail.setMinimumHeight(140)
-        layout.addWidget(self.selection_detail)
-
-        metadata_title = QLabel("메타정보")
-        metadata_title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(metadata_title)
+        self.selection_detail.setMinimumSize(40, 30)
+        self.detail_tabs.addTab(self.selection_detail, '상세 정보')
 
         self.selection_metadata_table = QTableWidget(0, 2)
         self.selection_metadata_table.setHorizontalHeaderLabels(["항목", "값"])
@@ -644,13 +698,34 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         metadata_header.setSectionResizeMode(0, QHeaderView.Interactive)
         metadata_header.setSectionResizeMode(1, QHeaderView.Stretch)
         self.selection_metadata_table.setColumnWidth(0, 180)
-        self.selection_metadata_table.setMinimumHeight(180)
-        layout.addWidget(self.selection_metadata_table, 1)
+        self.selection_metadata_table.setMinimumSize(40, 30)
+        self.detail_tabs.addTab(self.selection_metadata_table, '메타정보')
 
         return panel
 
+    def _set_details_visible(self, visible):
+        if hasattr(self, 'image_dock'):
+            self._set_all_docks_visible(visible)
+
+    def _update_workspace_mode(self, force_compact=False):
+        if not hasattr(self, 'image_dock'):
+            return
+        short = self.height() < 520
+        self.centralWidget().layout().setSpacing(4 if short else 6)
+        self.centralWidget().layout().setContentsMargins(8, 4 if short else 6, 8, 4 if short else 8)
+        if force_compact:
+            self._short_workspace = False
+        self._update_dock_layout()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_workspace_mode()
+        if hasattr(self, 'active_files_label'):
+            self._sync_processing_compact_summary()
+
     def _build_delete_table(self) -> QTableWidget:
         table = QTableWidget(0, 3)
+        table.verticalHeader().setDefaultSectionSize(26)
         table.setHorizontalHeaderLabels(["선택", "삭제 대상", "사유"])
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -744,6 +819,17 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
 
     def _open_settings_dialog(self) -> None:
         if self._busy:
+            if self._busy_settings_dialog is not None:
+                self._busy_settings_dialog.raise_()
+                return
+            from copy import deepcopy
+            snapshot = getattr(self, '_active_operation_settings', None) or self._current_settings()
+            dialog = SettingsDialog(self, deepcopy(snapshot), read_only=True)
+            dialog.setModal(False)
+            dialog.setAttribute(Qt.WA_DeleteOnClose)
+            self._busy_settings_dialog = dialog
+            dialog.destroyed.connect(lambda: setattr(self, '_busy_settings_dialog', None))
+            dialog.show()
             return
         dialog = SettingsDialog(self, self._current_settings())
         if dialog.exec() != QDialog.Accepted:
@@ -805,6 +891,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self._update_device_name_hint(text)
 
     def _update_device_name_hint(self, text: str) -> None:
+        self._update_additional_options_state()
         override = text.strip()
         if override:
             self.device_name_hint.setText(f"현재 모델명 override 활성화: 이번 작업 전체에 `{override}` 를 우선 적용합니다.")
@@ -812,6 +899,16 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
             return
         self.device_name_hint.setText("현재는 메타데이터와 파일명 fallback 기준으로 모델명을 자동 추출합니다.")
         self.device_name_hint.setStyleSheet("color: #666;")
+
+    def _update_additional_options_state(self, _value=None):
+        if not hasattr(self, 'additional_options_toggle'):
+            return
+        override = self.device_name_edit.text().strip()
+        moving = self.mode_combo.currentText() == 'move'
+        flags = (['이동'] if moving else []) + (['기기 지정'] if override else [])
+        self.additional_options_toggle.setText('추가 옵션' + (' (' + ', '.join(flags) + ')' if flags else ''))
+        self.additional_options_toggle.setToolTip(
+            '처리 방식: ' + ('이동' if moving else '복사') + '\n기기 모델명: ' + (override or '메타데이터/파일명에서 자동 추출'))
 
     def _build_request(self, preview_only: bool) -> OrganizeRequest | None:
         source = Path(self.source_edit.text().strip())
@@ -986,7 +1083,11 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
                 self._set_busy(False)
             self.last_preview_signature = current_signature
             self._job_preview_completed()
+        if not self._confirm_execution(request, self.last_preview_bundle, job=self._job_state):
+            self._set_status('실행 취소 — 변환을 시작하지 않았습니다.')
+            return
         if not self._job_execution_checkpoint():
+            self._pending_execution_estimate = None
             return
         self._set_busy(True)
         self._update_progress("실행 준비 중", 0, 0)
@@ -995,7 +1096,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
                 execute_options = {"preview_bundle": self.last_preview_bundle}
                 if isinstance(self.engine, OrganizerEngine):
                     execute_options["job_state"] = self._job_state
-                bundle = self._run_engine_operation(self.engine.execute, request, **execute_options)
+                bundle = self._run_engine_operation(self.engine.execute, request, execution_progress=True, **execute_options)
             except Exception as exc:
                 try:
                     self._refresh_journal()
@@ -1009,7 +1110,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
                 self._show_operation_error("실행 완료 여부 미확인", exc)
                 return
         else:
-            bundle = self._run_engine_operation(self.engine.execute, request)
+            bundle = self._run_engine_operation(self.engine.execute, request, execution_progress=True)
             self.last_preview_bundle = PreviewBundle(
                 preview_items=bundle.preview_items,
                 error_items=bundle.error_items,
@@ -1228,9 +1329,8 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
             self.delete_table.setItem(row, 2, reason_cell)
 
     def _handle_tab_changed(self, _index: int) -> None:
-        if self._busy:
-            return
-        self._job_mark_changed()
+        if not self._busy:
+            self._job_mark_changed()
         current = self.tabs.currentWidget()
         if current is self.preview_tab:
             self._update_selection_detail("preview")
@@ -1242,15 +1342,11 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
             self._update_selection_detail("delete")
 
     def _handle_results_item_clicked(self, item: QTableWidgetItem) -> None:
-        if self._busy:
-            return
         if item.column() in (3, 4, 6):
             self._results_detail_column = item.column()
         self._update_selection_detail("results")
 
     def _handle_preview_item_clicked(self, item: QTableWidgetItem) -> None:
-        if self._busy:
-            return
         if item.column() in (0, 1, 3):
             self._preview_detail_column = item.column()
         self._update_selection_detail("preview")
@@ -1263,7 +1359,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
 
     def _update_selection_detail(self, table_name: str) -> None:
         if self._busy:
-            return
+            self._queue_busy_detail(table_name)
         self._update_preview_image(table_name)
         if table_name == "preview":
             selected_items = self.preview_table.selectedItems()
@@ -1502,8 +1598,6 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         return None
 
     def _metadata_entries_for_path(self, path: Path | None) -> list[tuple[str, str]]:
-        if self._operation_active:
-            return []
         if path is None:
             return []
         try:
@@ -1518,6 +1612,9 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         cached = self._detail_metadata_cache.get(cache_key)
         if cached is not None and cached[0] == fingerprint:
             return cached[1]
+        if self._busy:
+            busy_cached = self._busy_detail_metadata_cache.get(cache_key)
+            return busy_cached[1] if busy_cached and busy_cached[0] == fingerprint else []
         entries = self.engine.describe_media_path(path)
         self._detail_metadata_cache[cache_key] = (fingerprint, entries)
         return entries
@@ -1526,6 +1623,99 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.preview_image_view.setPixmap(QPixmap())
         self.preview_image_view.setText(text)
         self.preview_image_info.setText(text)
+
+    def _queue_busy_detail(self, table_name):
+        raw = self._selected_image_source_path(table_name)
+        path = Path(raw) if raw else None
+        fingerprint = self._file_detail_fingerprint(path) if path is not None else None
+        key = (str(path), fingerprint, table_name)
+        if key == self._busy_read_current_key:
+            return
+        self._busy_read_current_key = key
+        self._current_preview_source_path = None
+        self._busy_read_token += 1
+        token = self._busy_read_token
+        self._busy_read_pending = None
+        if path is None or fingerprint is None or table_name == 'delete':
+            self._set_preview_image_placeholder('선택한 파일을 찾을 수 없습니다.' if path else '항목을 선택해주세요.')
+            return
+        cached = self._detail_metadata_cache.get(str(path))
+        if cached is None or cached[0] != fingerprint:
+            cached = self._busy_detail_metadata_cache.get(str(path))
+        cached_entries = tuple(cached[1]) if cached and cached[0] == fingerprint else None
+        if table_name == 'preview' and cached_entries is None and self.last_preview_bundle:
+            for item in self.last_preview_bundle.preview_items:
+                if item.source_path == str(path) and self._preview_metadata_fingerprints.get(item.source_path) == fingerprint:
+                    cached_entries = tuple(item.metadata_entries) or None
+                    break
+        size = self.preview_image_scroll.viewport().size()
+        if size.width() < 240 or size.height() < 180:
+            size = QSize(640, 420)
+        self._set_preview_image_placeholder('선택 파일 조회 중…')
+        self._busy_read_pending = (token, path, fingerprint, size, cached_entries, table_name in {'preview', 'results'})
+        self._start_busy_detail_read()
+
+    def _start_busy_detail_read(self):
+        if self._busy_read_worker is not None or self._busy_read_pending is None or not self._busy:
+            return
+        from .busy_detail_worker import BusyDetailWorker
+        request, self._busy_read_pending = self._busy_read_pending, None
+        worker = BusyDetailWorker(request, self)
+        self._busy_read_worker = worker
+        worker.result_ready.connect(self._receive_busy_detail, Qt.QueuedConnection)
+        worker.finished.connect(self._busy_detail_finished, Qt.QueuedConnection)
+        worker.start()
+
+    def _receive_busy_detail(self, result):
+        token, path, before, after, entries, image, error = result
+        if token != self._busy_read_token or not self._busy:
+            return
+        if after != before or self._file_detail_fingerprint(path) != before:
+            self._busy_read_current_key = None
+            self._set_selection_metadata([])
+            self._set_preview_image_placeholder('파일이 변경되었거나 원본을 찾을 수 없습니다. 다시 선택해주세요.')
+            return
+        if error:
+            self._busy_read_current_key = None
+            self._set_selection_metadata([('조회 오류', error)])
+            self._set_preview_image_placeholder('파일 조회 실패: ' + error)
+            return
+        if self._busy_read_current_key[2] in {'preview', 'results'}:
+            self._busy_detail_metadata_cache[str(path)] = (before, entries)
+            self._set_selection_metadata(entries)
+        self._current_preview_source_path = path
+        if not image.isNull():
+            self.preview_image_view.setPixmap(QPixmap.fromImage(image))
+            self.preview_image_view.setText('')
+            self.preview_image_info.setText(str(path))
+        else:
+            self._set_preview_image_placeholder('이미지 미리보기를 표시할 수 없습니다.')
+            self.preview_image_info.setText(str(path))
+
+    def _busy_detail_finished(self):
+        worker, self._busy_read_worker = self._busy_read_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        if self._busy_read_close_pending:
+            self._busy_read_close_pending = False
+            QTimer.singleShot(0, self.close)
+        else:
+            self._start_busy_detail_read()
+
+    def _update_active_file_display(self, activities):
+        stages = {'metadata': '메타정보', 'copy': '정리', 'output': '출력 변환', 'source_remove': '원본 이동 마무리'}
+        names, details = [], []
+        for activity in activities:
+            stage = stages.get(activity.stage, activity.stage)
+            names.append(f'{Path(activity.source_path).name} ({stage})')
+            details.append(f'{activity.source_path} — {stage}')
+        self.active_files_label.setText('처리 중: ' + ' · '.join(names) if names else '')
+        self.active_files_label.setToolTip('\n'.join(details))
+        self.active_files_label.setVisible(bool(names))
+        self._sync_processing_compact_summary()
+
+    def _sync_processing_compact_summary(self):
+        self.mobile_output_summary.setVisible(not (self.height() < 700 and bool(self.active_files_label.text())))
 
     def _set_selection_detail_text(self, text: str) -> None:
         self.selection_detail.setPlainText(text)
@@ -1561,18 +1751,24 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.status_label.setText(text)
 
     def _set_busy(self, busy: bool) -> None:
+        self.selection_detail_panel.setEnabled(True)
+        self.selection_image_panel.setEnabled(True)
         self._busy = busy
         self.model_selection_panel.setEnabled(not busy and self.last_execution_bundle is None and bool(self.last_preview_bundle and self.last_preview_bundle.preview_items))
-        self.preview_table.setEnabled(not busy)
+        self.preview_table.setEnabled(True)
         for table in (self.results_table, self.error_table, self.delete_table, self.selection_metadata_table):
-            table.setEnabled(not busy)
-        self.tabs.tabBar().setEnabled(not busy)
-        self.preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers if self._job_started() else
+            table.setEnabled(True)
+        for row in range(self.delete_table.rowCount()):
+            checkbox = self.delete_table.cellWidget(row, 0)
+            if checkbox is not None:
+                checkbox.setEnabled(not busy)
+        self.tabs.tabBar().setEnabled(True)
+        self.preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers if busy or self._job_started() else
                                            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.preview_button.setEnabled(not busy)
         self.execute_button.setEnabled(not busy)
         self.delete_button.setEnabled(not busy and bool(self.current_delete_candidates))
-        self.settings_button.setEnabled(not busy)
+        self.settings_button.setEnabled(True)
         self.phone_transfer_button.setEnabled(not busy)
         for widget in (self.source_edit, self.target_edit, self.device_name_edit, self.mode_combo,
                        self.source_select_button, self.target_select_button):
@@ -1581,6 +1777,10 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self._poll_operation_control()
         QApplication.processEvents()
         if not busy:
+            self._busy_read_token += 1
+            self._busy_read_pending = None
+            self._busy_read_current_key = None
+            self._busy_detail_metadata_cache.clear()
             self._schedule_operation_autosave()
 
     def _update_progress(self, message: str, current: int, total: int) -> None:
@@ -1600,9 +1800,20 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.progress_bar.setFormat(message)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self._busy or not self._confirm_job_transition():
+        if self._busy:
             event.ignore()
             return
+        if self._busy_read_worker is not None:
+            self._busy_read_close_pending = True
+            self._busy_read_pending = None
+            self._busy_read_worker.requestInterruption()
+            event.ignore()
+            return
+        if not self._confirm_job_transition():
+            event.ignore()
+            return
+        if hasattr(self, '_view_preferences'):
+            self._view_preferences.save()
         self._job_timer.stop()
         if self._global_settings.autosave_job_changes:
             self._autosave_job()

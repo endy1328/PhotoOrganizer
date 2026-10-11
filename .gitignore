@@ -1,47 +1,79 @@
-# Python cache
+# Python caches and generated package metadata
 __pycache__/
 *.py[cod]
-*.pyo
 *.pyd
-
-# Virtual environments
-.venv/
-.venv311/
-
-# Local temp/test work
-.tmp_env/
-.tmp_test/
-.codex/
-
-# Build artifacts
-build/
-build_release/
-dist/
-dist_release/
-*.spec.bak
-
-# Runtime files
-logs/
-config.toml
-
-
-# Non-runtime project assets
-AGENT.md
-TASKS.md
-README.md
-docs/
-tests/
-scripts/
-
-# Packaging metadata
 *.egg-info/
 .eggs/
 
-# Test / coverage outputs
-.coverage
-.pytest_cache/
-htmlcov/
+# Local Python environments
+.venv*/
+venv/
+env/
 
-# OS / editor noise
+# Build outputs (all versioned and experimental builds)
+/build/
+/build_*/
+/dist/
+/dist_*/
+*.spec.bak
+
+# Runtime data and user jobs -- keep config.toml.sample tracked
+/logs/
+/logs_*/
+/sessions/
+*.pojob.json
+config.toml
+settings.json
+view_preferences.json
+execution_estimates.json
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+
+# Local scratch/test work and abandoned temporary test directories
+/.tmp*/
+/dockprefs_*/
+/job_validation_*/
+/preview_edit_test_*/
+/resume_engine_*/
+/-
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Generated GUI validation captures at the project root only
+/ui_*.png
+/*_ui.png
+/*_settings.png
+/job_resume_plan.png
+
+# Local agent/editor installations and credentials
+# .agents/skills and skills-lock.json are shared project assets and stay tracked.
+/.codex/
+/.claude/
+/.windsurf/
+/.aws/
+.env
+.env.*
+!.env.example
+!.env.sample
+*.code-workspace
+
+# OS/editor noise
 Thumbs.db
 .DS_Store
+*.swp
+*.swo
+
+# Track source, tests, docs, scripts, AGENT.md, README.md, TASKS.md,
+# PhotoOrganizer.spec, dependency declarations, and configuration samples.

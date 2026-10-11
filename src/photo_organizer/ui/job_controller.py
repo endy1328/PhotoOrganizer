@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QDialog
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QDialog, QMenu, QToolButton
 
 from ..job_store import JobState, load_job, save_job
 from ..job_validation import capture_file_states, validate_preview_files, validate_delete_candidate
@@ -35,19 +35,32 @@ class JobControllerMixin:
         self._job_timer.timeout.connect(lambda: self._autosave_job())
 
     def _build_job_controls(self, layout):
+        from .responsive_layout import ElidedLabel
         row = QHBoxLayout()
+        self.job_menu_button = QToolButton()
+        self.job_menu_button.setText('작업')
+        self.job_menu_button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(self.job_menu_button)
+        self.job_menu_button.setMenu(menu)
+        self.job_actions = {}
         for attribute, label, callback in (
             ('job_new_button', '새 작업', self._new_job),
             ('job_open_button', '작업 열기', self._choose_open_job),
             ('job_save_button', '작업 저장', self._save_job),
             ('job_save_as_button', '다른 이름으로 저장', lambda: self._save_job(save_as=True)),
         ):
-            button = QPushButton(label)
+            button = QPushButton(label, self)
             setattr(self, attribute, button)
             button.clicked.connect(callback)
-            row.addWidget(button)
-        self.job_status_label = QLabel('새 작업')
+            button.hide()
+            action = menu.addAction(label)
+            action.triggered.connect(button.click)
+            self.job_actions[attribute] = action
+        row.addWidget(self.job_menu_button)
+        row.addWidget(self.additional_options_toggle)
+        self.job_status_label = ElidedLabel('새 작업')
         row.addWidget(self.job_status_label, 1)
+        row.addWidget(self.details_toggle)
         layout.addLayout(row)
 
     def _job_started(self):
@@ -65,6 +78,8 @@ class JobControllerMixin:
     def _job_controls_busy(self, busy):
         for name in ('job_new_button', 'job_open_button', 'job_save_button', 'job_save_as_button'):
             getattr(self, name).setEnabled(not busy)
+            self.job_actions[name].setEnabled(not busy)
+        self.job_menu_button.setEnabled(not busy)
         started = self._job_started()
         self.preview_button.setEnabled(not busy and not started)
         self.execute_button.setEnabled(not busy and not started)
@@ -206,7 +221,7 @@ class JobControllerMixin:
     def _save_job(self, checked=False, *, save_as=False):
         if self._busy or self._operation_active:
             return False
-        self.job_save_button.setFocus()
+        self.job_menu_button.setFocus()
         path = self._job_path
         if path is None or save_as:
             filename, _ = QFileDialog.getSaveFileName(self, '작업 저장', str(path or Path.cwd() / '새 작업.pojob.json'),
@@ -422,6 +437,19 @@ class JobControllerMixin:
                 return
             if not any(action.action == 'RUN' and action.allowed for action in actions):
                 return
+            item_ids = {action.item_id for action in actions if action.action == 'RUN' and action.allowed}
+            if not self._confirm_execution(self._job_state.settings, self._job_state.preview_bundle,
+                                           job=self._job_state, item_ids=item_ids, mode=mode):
+                self._set_status('복구 실행 취소 — 변환을 시작하지 않았습니다.')
+                return
+            ledger = self._job_state.ledger
+            self._pending_recovery_counts = {
+                'kept': len({a.item_id for a in actions if a.action == 'KEEP'} - item_ids),
+                'pending': len(item_ids),
+                'failed': sum(any(record['state'] == 'FAILED' for record in stages.values())
+                              for stages in ledger.values()),
+                'blocked': len({a.item_id for a in actions if a.action == 'BLOCK'}),
+            }
             self._job_timer.stop()
             self._job_state.phase = 'EXECUTING'
             self._write_recent_job()
@@ -432,7 +460,7 @@ class JobControllerMixin:
             return
         self._set_busy(True)
         try:
-            self.last_execution_bundle = self._run_engine_operation(self.engine.resume, self._job_state, mode=mode)
+            self.last_execution_bundle = self._run_engine_operation(self.engine.resume, self._job_state, mode=mode, execution_progress=True)
             self._job_state.execution_bundle = self.last_execution_bundle
             self._job_execution_completed()
             self._display_recovered_results()

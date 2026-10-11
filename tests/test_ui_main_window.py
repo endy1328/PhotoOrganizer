@@ -47,6 +47,9 @@ class VideoThumbnailTests(unittest.TestCase):
 @unittest.skipIf(QApplication is None, "PySide6 미설치 환경")
 class VideoThumbnailUiTests(unittest.TestCase):
     def setUp(self) -> None:
+        confirmation = patch('photo_organizer.ui.execution_controller.ExecutionConfirmDialog.exec', return_value=1)
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
         for method in ("_confirm_job_transition", "_restore_recent_job", "_autosave_job"):
             fixture = patch(f"photo_organizer.ui.main_window.MainWindow.{method}", new=(lambda self: True) if method == "_confirm_job_transition" else (lambda self: None), create=True)
             fixture.start()
@@ -67,8 +70,8 @@ class VideoThumbnailUiTests(unittest.TestCase):
         base = self._case_dir("version_title")
         window = MainWindow(OrganizerEngine(base), ConfigManager(base))
         self.assertEqual(window.windowTitle(), f"PhotoOrganizer {__version__} ({__release_date__})")
-        self.assertEqual(__version__, "1.0.1.13")
-        self.assertEqual(__release_date__, "2026-10-11")
+        self.assertEqual(__version__, "1.0.1.17")
+        self.assertEqual(__release_date__, "2026-10-12")
         import tomllib
         project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(project["project"]["version"], __version__)

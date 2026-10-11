@@ -21,6 +21,9 @@ class JobUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        confirmation = patch('photo_organizer.ui.execution_controller.ExecutionConfirmDialog.exec', return_value=1)
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.engine = Mock()

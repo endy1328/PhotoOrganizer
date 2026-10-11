@@ -22,6 +22,9 @@ class ModelSelectionUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        confirmation = patch('photo_organizer.ui.execution_controller.ExecutionConfirmDialog.exec', return_value=1)
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
         # Job persistence is covered by test_job_ui; these fixtures use partial media objects.
         for method in ("_confirm_job_transition", "_restore_recent_job", "_autosave_job", "_write_recent_job"):
             fixture = patch(f"photo_organizer.ui.main_window.MainWindow.{method}", new=(lambda self: True) if method == "_confirm_job_transition" else (lambda self: None))

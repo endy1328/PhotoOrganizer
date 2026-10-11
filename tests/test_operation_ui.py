@@ -75,7 +75,7 @@ class OperationUiTests(unittest.TestCase):
         self.assertFalse(self.window.pause_button.isEnabled())
         self.assertFalse(self.window.stop_button.isEnabled())
 
-    def test_busy_tables_and_autosave_are_locked(self):
+    def test_busy_tables_allow_browsing_while_autosave_and_transfer_are_locked(self):
         self.window._set_busy(True)
         def operation(*, control, progress_callback):
             threading.Event().wait(.06)
@@ -90,7 +90,7 @@ class OperationUiTests(unittest.TestCase):
             QTimer.singleShot(5, inspect)
             self.window._run_engine_operation(operation)
         save.assert_not_called()
-        self.assertEqual(seen, [False, False, False])
+        self.assertEqual(seen, [True, True, False])
         self.window._set_busy(False)
 
     def test_stop_releases_paused_worker(self):
@@ -107,14 +107,14 @@ class OperationUiTests(unittest.TestCase):
         self.assertEqual(paused, [True])
         self.assertTrue(self.window._operation_stopped)
 
-    def test_busy_image_metadata_and_tabs_do_not_start_detail_work(self):
+    def test_busy_detail_uses_async_queue_and_tabs_remain_available(self):
         self.window._set_busy(True)
-        with patch.object(self.window, '_metadata_entries_for_path') as metadata, patch.object(self.window, '_selected_image_source_path') as selected:
+        with patch.object(self.window, '_metadata_entries_for_path') as metadata, patch.object(self.window, '_queue_busy_detail') as queue:
             self.window._update_selection_detail('preview')
             self.window._update_preview_image('preview')
         metadata.assert_not_called()
-        selected.assert_not_called()
-        self.assertFalse(self.window.tabs.tabBar().isEnabled())
+        queue.assert_called_once_with('preview')
+        self.assertTrue(self.window.tabs.tabBar().isEnabled())
         self.window._set_busy(False)
         self.assertTrue(self.window.tabs.tabBar().isEnabled())
 

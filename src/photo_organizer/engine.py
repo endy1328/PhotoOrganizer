@@ -5,6 +5,7 @@ import shutil
 import re
 import tempfile
 import os
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -71,7 +72,8 @@ class OrganizerEngine:
         media_items: list[MediaItem] = []
         for index, path in enumerate(items, start=1):
             self._preview_checkpoint(control)
-            media_items.append(self.extractor.extract(path))
+            with (control.file_activity(str(path), path, 'metadata') if control is not None else nullcontext()):
+                media_items.append(self.extractor.extract(path))
             self._report_progress(progress_callback, "메타데이터 읽는 중", index, total_items)
         self._preview_checkpoint(control)
         self._report_progress(progress_callback, "영상 모델명 정리 중", 0, total_items)
@@ -117,113 +119,124 @@ class OrganizerEngine:
             source = Path(preview_item.source_path)
             target = Path(preview_item.target_path)
             converter_called = False
-            try:
-                if preview_item.write_mode == "CONFLICT":
-                    raise FileExistsError("출력 파일명이 기존 파일 또는 다른 처리 항목과 충돌합니다.")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if preview_item.filename_edited:
-                    self._validate_manual_filename(preview_item.new_filename, source.suffix)
-                    if target != Path(preview_item.target_directory) / preview_item.new_filename:
-                        raise ValueError("사용자 지정 파일명과 대상 경로가 일치하지 않습니다.")
-                    if preview_item.mobile_output_path and Path(preview_item.mobile_output_path).exists():
-                        raise FileExistsError("모바일 출력 파일이 이미 존재합니다.")
-                    self._copy_exclusive(source, target)
-                    action = request.operation_mode
-                    mobile_output_source = target if action == "move" else source
-                elif request.operation_mode == "move":
-                    if preview_item.write_mode == "OVERWRITE" and target.exists():
-                        target.unlink()
-                    shutil.move(str(source), str(target))
-                    action = "move"
-                    mobile_output_source = target
-                else:
-                    shutil.copy2(str(source), str(target))
-                    action = "copy"
-                    mobile_output_source = source
-                mobile_output_status = ""
-                mobile_output_message = ""
-                if preview_item.mobile_output_enabled and preview_item.mobile_output_path:
-                    create_output = self._create_mobile_output_exclusive if preview_item.filename_edited else self._create_mobile_output
-                    try:
+            with (control.file_activity(preview_item.item_id, source, 'copy') if control is not None else nullcontext()):
+                try:
+                    if preview_item.write_mode == "CONFLICT":
+                        raise FileExistsError("출력 파일명이 기존 파일 또는 다른 처리 항목과 충돌합니다.")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if preview_item.filename_edited:
+                        self._validate_manual_filename(preview_item.new_filename, source.suffix)
+                        if target != Path(preview_item.target_directory) / preview_item.new_filename:
+                            raise ValueError("사용자 지정 파일명과 대상 경로가 일치하지 않습니다.")
+                        if preview_item.mobile_output_path and Path(preview_item.mobile_output_path).exists():
+                            raise FileExistsError("모바일 출력 파일이 이미 존재합니다.")
+                        self._copy_exclusive(source, target)
+                        action = request.operation_mode
+                        mobile_output_source = target if action == "move" else source
+                    elif request.operation_mode == "move":
+                        if preview_item.write_mode == "OVERWRITE" and target.exists():
+                            target.unlink()
+                        shutil.move(str(source), str(target))
+                        action = "move"
+                        mobile_output_source = target
+                    else:
+                        shutil.copy2(str(source), str(target))
+                        action = "copy"
+                        mobile_output_source = source
+                    mobile_output_status = ""
+                    mobile_output_message = ""
+                    if preview_item.mobile_output_enabled and preview_item.mobile_output_path:
+                        create_output = self._create_mobile_output_exclusive if preview_item.filename_edited else self._create_mobile_output
+                        try:
+                            if preview_item.media_type == "video":
+                                from .video_output import clear_video_encoder_report
+                                clear_video_encoder_report()
+                            converter_called = True
+                            if control is not None:
+                                control.update_file_activity(preview_item.item_id, 'output')
+                            mobile_output_status = create_output(
+                                source_path=mobile_output_source,
+                                target_path=Path(preview_item.mobile_output_path),
+                                media_type=preview_item.media_type,
+                                request=request,
+                            )
+                        except MobileOutputSizeExcluded as exc:
+                            mobile_output_status = "SIZE_EXCLUDED"
+                            mobile_output_message = str(exc)
+                            log_events.append(LogEvent("INFO", mobile_output_message, str(source),
+                                                       preview_item.mobile_output_path))
                         if preview_item.media_type == "video":
-                            from .video_output import clear_video_encoder_report
-                            clear_video_encoder_report()
-                        converter_called = True
-                        mobile_output_status = create_output(
-                            source_path=mobile_output_source,
-                            target_path=Path(preview_item.mobile_output_path),
-                            media_type=preview_item.media_type,
-                            request=request,
+                            from .video_output import get_last_video_encoder_report
+                            report = get_last_video_encoder_report()
+                            if report:
+                                mobile_output_message = "; ".join(part for part in (mobile_output_message, report) if part)
+                        if mobile_output_status == "SUCCESS":
+                            set_capture_file_times(
+                                Path(preview_item.mobile_output_path),
+                                datetime.fromisoformat(preview_item.captured_at),
+                            )
+                    if preview_item.filename_edited and request.operation_mode == "move":
+                        if control is not None:
+                            control.update_file_activity(preview_item.item_id, 'source_remove')
+                        source.unlink()  # 사용자 지정 출력이 모두 성공한 뒤에만 원본 경로를 제거한다.
+                    if request.operation_mode == "copy":
+                        delete_review_items.append(
+                            DeleteReviewItem(
+                                item_id=preview_item.item_id,
+                                delete_path=str(source),
+                                reason="복사 완료 후 원본 정리 후보",
+                            )
                         )
-                    except MobileOutputSizeExcluded as exc:
-                        mobile_output_status = "SIZE_EXCLUDED"
-                        mobile_output_message = str(exc)
-                        log_events.append(LogEvent("INFO", mobile_output_message, str(source),
-                                                   preview_item.mobile_output_path))
-                    if preview_item.media_type == "video":
+                    results.append(
+                        ExecutionResult(
+                            source_path=str(source),
+                            target_path=str(target),
+                            status="SUCCESS",
+                            action=action,
+                            write_mode=preview_item.write_mode,
+                            message=preview_item.write_mode,
+                            mobile_output_path=preview_item.mobile_output_path,
+                            mobile_output_status=mobile_output_status,
+                            mobile_output_message=mobile_output_message,
+                        )
+                    )
+                    if control is not None:
+                        control.report_file_result(preview_item.item_id, source,
+                                                   'ERROR' if mobile_output_status == 'ERROR' else 'SUCCESS',
+                                                   mobile_output_message if mobile_output_status == 'ERROR' else '')
+                    log_events.append(
+                        LogEvent(
+                            level="INFO",
+                            message=f"{action.upper()} {preview_item.write_mode} 성공",
+                            source_path=str(source),
+                            target_path=str(target),
+                        )
+                    )
+                except Exception as exc:
+                    encoder_report = ""
+                    if converter_called and preview_item.media_type == "video":
                         from .video_output import get_last_video_encoder_report
-                        report = get_last_video_encoder_report()
-                        if report:
-                            mobile_output_message = "; ".join(part for part in (mobile_output_message, report) if part)
-                    if mobile_output_status == "SUCCESS":
-                        set_capture_file_times(
-                            Path(preview_item.mobile_output_path),
-                            datetime.fromisoformat(preview_item.captured_at),
-                        )
-                if preview_item.filename_edited and request.operation_mode == "move":
-                    source.unlink()  # 사용자 지정 출력이 모두 성공한 뒤에만 원본 경로를 제거한다.
-                if request.operation_mode == "copy":
-                    delete_review_items.append(
-                        DeleteReviewItem(
-                            item_id=preview_item.item_id,
-                            delete_path=str(source),
-                            reason="복사 완료 후 원본 정리 후보",
+                        encoder_report = get_last_video_encoder_report()
+                    results.append(
+                        ExecutionResult(
+                            source_path=str(source),
+                            target_path=str(target),
+                            status="ERROR",
+                            action=request.operation_mode,
+                            write_mode=preview_item.write_mode,
+                            message=str(exc),
+                            mobile_output_path=preview_item.mobile_output_path,
+                            mobile_output_status="ERROR" if preview_item.mobile_output_enabled and preview_item.mobile_output_path else "",
+                            mobile_output_message=encoder_report,
                         )
                     )
-                results.append(
-                    ExecutionResult(
-                        source_path=str(source),
-                        target_path=str(target),
-                        status="SUCCESS",
-                        action=action,
-                        write_mode=preview_item.write_mode,
-                        message=preview_item.write_mode,
-                        mobile_output_path=preview_item.mobile_output_path,
-                        mobile_output_status=mobile_output_status,
-                        mobile_output_message=mobile_output_message,
-                    )
-                )
-                log_events.append(
-                    LogEvent(
-                        level="INFO",
-                        message=f"{action.upper()} {preview_item.write_mode} 성공",
-                        source_path=str(source),
-                        target_path=str(target),
-                    )
-                )
-            except Exception as exc:
-                encoder_report = ""
-                if converter_called and preview_item.media_type == "video":
-                    from .video_output import get_last_video_encoder_report
-                    encoder_report = get_last_video_encoder_report()
-                results.append(
-                    ExecutionResult(
-                        source_path=str(source),
-                        target_path=str(target),
-                        status="ERROR",
-                        action=request.operation_mode,
-                        write_mode=preview_item.write_mode,
-                        message=str(exc),
-                        mobile_output_path=preview_item.mobile_output_path,
-                        mobile_output_status="ERROR" if preview_item.mobile_output_enabled and preview_item.mobile_output_path else "",
-                        mobile_output_message=encoder_report,
-                    )
-                )
-                preview_bundle.error_items.append(ErrorItem(source_path=str(source), message=str(exc)))
-                log_events.append(LogEvent(level="ERROR", message=f"실행 실패: {exc}", source_path=str(source), target_path=str(target)))
-                if (preview_item.write_mode != "CONFLICT" and preview_item.mobile_output_enabled
-                        and preview_item.mobile_output_path):
-                    break
+                    preview_bundle.error_items.append(ErrorItem(source_path=str(source), message=str(exc)))
+                    if control is not None:
+                        control.report_file_result(preview_item.item_id, source, 'ERROR', str(exc))
+                    log_events.append(LogEvent(level="ERROR", message=f"실행 실패: {exc}", source_path=str(source), target_path=str(target)))
+                    if (preview_item.write_mode != "CONFLICT" and preview_item.mobile_output_enabled
+                            and preview_item.mobile_output_path):
+                        break
             self._report_progress(progress_callback, "파일 정리 실행 중", index, total_items)
         self.logger.write_session_log(log_events)
         if control is not None and control.stopped:

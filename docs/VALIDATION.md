@@ -1,5 +1,59 @@
 # VALIDATION
 
+## 2026-10-12 Git ignore 및 20261012 사전 확인
+
+- 기존 규칙은 README/AGENT/TASKS/docs/tests/scripts를 제외하면서 build_v*/dist_v*/루트 로그·작업·캡처를 허용했다. 실제 HEAD255개/index367개를 검사했다.
+- 수정 규칙으로 index241개,HEAD129개 제외를 확인했다. HEAD 제외는 Python 캐시107/egg-info6/중복 로컬 설치16개다. 기존 staged 산출물을 그대로 업로드하지 않고 명시적 cached 제거로 파일을 보존한다.
+- `.agents/skills/uncodixfy`와 두 중복 설치의 파일 해시 차이는0이며 canonical 공유 skill/라이선스·공개 skills-lock과 config.toml.sample은 유지한다. 신규 소스·테스트·설계 문서가 정상적인 untracked 후보로 나타난다.
+- origin은 PhotoOrganizer 저장소다. remote20261012 미존재,local20261012=현재HEAD8ae2593 및 좌우0/0 확인. 직전567개 전체 회귀565통과/2skip와1.0.1.17 EXE 검증 로그 확인. 앱 코드/버전 변경 없이 추적 정책과 문서만 갱신한다.
+- ignore 유지/제외43개 경로 사례 검증. index241개를 정확한 NUL manifest로 cached 제거했고 모두 로컬 크기/mtime 불변을 확인했다. 깨끗한 source index157개,ignored tracked0개,예상 밖 untracked0개다. Python source/tests 구문 및 source/test/docs의 staged diff 공백 검증 통과. vendored skill README의 기존 Markdown hard-break 공백은 그대로 유지한다.
+
+## 2026-10-12 실행 확인과 진행 상세 / 1.0.1.17
+
+- 추정12개/진행 패널10개/통합12개/결과 제어3개 통과. 취소 전 checkpoint 미호출, 실패 이력 학습 제외, 정지시간 제외, 빠른80개 burst 완료ID/오류 보존, 패널 닫기/재열기/배치 저장·초기화, 표시 종료 예외의 cleanup을 확인했다.
+- 독립 core/UI 검토 후 품질·출력폭별 이력, 첫 파일 잔여 추정/초과, lossless 집계, 동일 활동 셀 재사용, 패널 정지 상태 및 복구 건수 연결을 보완했다.
+- 최종 전체 unittest567개,565통과/Windows 링크 권한2skip/실패0(69.906초). validation_execution_full.log. 사용자 실행 앱과 테스트 전용 mutex로 분리했다. 기존 실행 관련 테스트는 확인창만 자동 승인하며 취소 동작은 독립 테스트로 검증한다.
+- 한국어 오프스크린 현재 파일/진행 요약 표시 시1920×1000 목록615px,1204×1032 목록521px,1024×650 목록166px,800×550 목록161px,602×516 목록147px. 150%1280×680/802×640에서196/251px,200%960×500/602×480에서162/111px 확보. ui_execution_* 캡처에서 확인창/기본 숨김/하단 전체 너비 도킹/분리 창을 직접 확인했다. 최초 기본 열기 후 넓은→좁은 창에서도 전체 너비 유지 회귀를 통과했다.
+- dist_v1.0.1.17/PhotoOrganizer.exe PyInstaller 빌드 성공(25.748초). FileVersion/ProductVersion1.0.1.17, Comments 수정날짜2026-10-12 및 추정/진행/확인/복구/병렬/무창 코드 내장12개 모듈 확인. build_execution_release.log. git diff --check 통과. 사용자 스테이징과 원격은 변경하지 않았다.
+- 검증 환경은 기존 Python3.13.14이며 목표3.12 및 실제 원격 EXE 수동 조작은 별도 확인 대상이다. 초기 성능 가정은 실제 장시간 미디어 벤치마크 결과가 아니며 시간 보장을 의미하지 않는다.
+
+## 2026-10-12 작업 중 조회와 현재 파일 / 1.0.1.16
+
+- 실제 제출 request/job 설정의 독립 복사, mapping 데이터 불변 및 예외 후 활동 표시 정리 통합3개 통과.
+- core 활동5개 통과: 불변 snapshot/4개 병렬/미리보기 파일 확인/직렬 실패 정리/복구 단계와 대기 중 pause 제외. 기존 OperationControl3개도 통과.
+- 집중 UI 및 통합 회귀66개 통과. 최신 선택/파일 변경·미생성/오류 안내/종료 안전, 비모달 조회 전용 설정과 실제 적용 snapshot, 제한 메타정보 캐시의 작업 후 전체 조회 복귀를 확인했다.
+- 최종 전체 unittest530개 실행,528통과/Windows 링크 권한2skip/실패0(88.024초). validation_busy_full.log. 테스트 전용 mutex로 사용자 앱과 분리했다. 환경은 기존 Python3.13.14이며 목표3.12 별도 검증은 미실시다.
+- 한국어 오프스크린 화면1920×1000 목록615px,1204×1032 목록521px,1024×650 목록166px,800×550 목록192px,602×516 목록147px. 150%1280×680/802×640에서196/282px,200%960×500/602×480에서162/111px를 확보했다. ui_busy_* 캡처를 직접 확인했다. 작은 창에서는 현재 파일 표시 공간 확보를 위해 출력 요약만 숨긴다.
+- 독립 검토에서 지연 종료 상태 초기화, 조회 오류와 파일 변경 구분, 외부 영상 조회15초 제한, 작업 중 제한 캐시와 전체 캐시 분리를 보완하고 회귀를 통과했다. 실제 원격 화면 및 배포 EXE의 수동 조작은 별도 확인 대상이다.
+- dist_v1.0.1.16/PhotoOrganizer.exe PyInstaller 빌드 성공(33.626초). FileVersion/ProductVersion1.0.1.16, Comments 수정날짜2026-10-12 및 작업 중 조회/활동 표시/설정 snapshot/병렬/무창 실행 내장8개 모듈을 확인했다. build_busy_release.log. git diff --check 통과. 사용자 스테이징을 유지하고 origin push는 수행하지 않았다.
+
+## 2026-10-12 Git 반영 사전 확인
+
+- 현재 소스 버전1.0.1.15/수정날짜2026-10-11, 기존 최종 전체508개 테스트506통과/2skip 로그 확인.
+- origin은 PhotoOrganizer 저장소이며 요청한 refs/heads/20260112는 사전 조회에서 존재하지 않았다. 프로그램 코드 변경 없이 Git 스냅샷을 준비한다.
+
+## 2026-10-11 독립 도킹 패널 / 1.0.1.15
+
+- 화면 선호 focused 15개 통과: 위치/폭/독립 표시 복원, truncated Qt 상태 fallback, 정상 marker 검증, 이전 설정 호환, 화면 밖 floating 창 보정, 기존 열 설정/작업 선호.
+- 집중 UI 회귀: 반응형7/도킹5/기존 상세12/실행 제어11/기본 UI17 통과. 도킹 허용영역과 기능, 사용자 배치 보호, tabbed 비활성 패널 표시 의도, busy 중 작업ID·dirty·요청서명 불변 확인.
+- 한국어 Malgun Gothic 오프스크린 화면: 1920×1000 목록642px, 1204×1032 목록548px, 1024×650 목록166px, 800×550 목록192px, 602×516 목록147px. 150% 1280×680/802×640 및 200% 960×500/602×480 목록 공간 확인(최소111px). 넓은→좁은 전환 하단 균등폭을 직접 캡처로 확인했다. ui_docking_*.
+- 독립 검토에 차단 이슈 없음. 최종 전체 unittest508개,506통과/Windows 링크 권한2skip/실패0(161.480초). validation_docking_full.log. 테스트 전용 mutex로 사용자 실행 앱과 분리했다. 검증 환경은 기존 Python3.13.14이며 목표3.12 별도 검증은 미실시다.
+- dist_v1.0.1.15/PhotoOrganizer.exe PyInstaller 빌드 성공(59.987초), FileVersion/ProductVersion1.0.1.15 및 Comments 수정날짜2026-10-11 확인. 도킹/native 지연 크기 조정·저장/복원·반응형·모델 선택·병렬 처리·무창 실행 내장7개 모듈과 버전 상수 확인. build_docking_release.log. git diff --check 통과. 브랜치20261011의 변경은 로컬에 유지했다.
+- 실제 원격 화면에서의 native 마우스 드래그와 배포 EXE 수동 조작은 별도 확인 대상이다.
+
+## 2026-10-11 작은 화면·원격 접속 UI / 1.0.1.14
+
+- 기존 한국어10pt Qt 화면:1024×650 요청 시 실제1024×854, minimumHint912×854, 목록viewport966×35 확인. ui_small_screen_before.png.
+- origin/20261011 snapshot8ae2593 push 완료, HEAD...origin/20261011=0/0 확인 후 UI 구현 시작. 로컬 작업/빌드 중간 산출물은 snapshot에서 제외했다.
+- 모델 접기/20모델 내부스크롤/선택·매핑·busy3개 RED→GREEN 및 기존 단독 매핑 테스트 통과. 화면 선호4개 RED→GREEN(열 순서/너비/표시/필수 새파일명/화면 밖 복원/손상 파일 기본값).
+- 독립 검토에서 매우 큰 splitter 정수 및 깊게 중첩된 선호JSON이 앱 시작 예외를 유발함을 재현했다. 크기 상한과 RecursionError 보호를 추가하여 RED→GREEN. 숨긴 열의 너비 보존도 실패 재현 뒤 보완했다. 표시 설정은 처리 설정/작업 서명과 분리된다.
+- 실제 malgun.ttf를 로드한 한국어 오프스크린 화면:1920×1000 목록664px,1204×1032 목록538px,1024×650 목록194px,800×550 목록214px,602×516 목록149px. 높이/너비가 작으면 상세를 자동 접고 사용자가 직접 펼치거나 접은 선택을 존중한다. ui_responsive_* 캡처를 직접 확인했다.
+- 별도 Qt 프로세스 QT_SCALE_FACTOR=1.5에서1280×680 목록192px/802×640 목록304px, =2에서960×500 목록164px/602×480 목록113px 및 주요 버튼 접근을 확인했다. 이는 논리적 가용 창/배율의 합성 검증이며 실제 모바일 원격 프로그램 수동 조작과는 구분한다.
+- 최종 전체 unittest496개,494통과/Windows 링크 권한2skip,실패0(61.494초). validation_responsive_full.log. 사용자 앱은 종료하거나 잠금을 변경하지 않았다. 소스 검증은 기존Python3.13.14이며 목표3.12 별도 검증은 미실시다.
+- dist_v1.0.1.14/PhotoOrganizer.exe 빌드 성공. FileVersion/ProductVersion1.0.1.14, Comments 수정날짜2026-10-11 확인. 반응형·모델 접기·선호 설정·작업 메뉴·기존 병렬/무창 코드7개 내장 모듈을 확인했다. build_responsive_release.log. git diff --check 통과.
+- 사용자 지시에 따라 사전push이후UI수정은 로컬에만 유지하고 추가originpush를 수행하지 않았다. 사전snapshot에 포함된 Python 캐시는 로컬에서만 추적 제외하고 실제 파일은 유지한다. 원격 snapshot은 변경하지 않는다.
+- 배포 EXE의 실제 휴대폰 원격 조작/모니터 간 이동은 수동 검증하지 않았다. 현재 새 EXE를 실행하면 설정/로그/화면 선호는 새 배포 폴더 기준으로 저장된다.
+
 ## 2026-10-11 GPU·사진 병렬 변환 검증 / 1.0.1.13
 
 - 로컬 RTX5080 및 Ryzen7 9800X3D 확인. 실제 h264_nvenc 30프레임 인코딩 성공. GPU capability 검사64x64는 드라이버 최소 해상도 제한으로 실패하여 실제 지원되는320x240으로 보완했다.

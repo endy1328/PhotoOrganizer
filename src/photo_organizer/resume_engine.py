@@ -5,7 +5,7 @@ import os
 import shutil
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from threading import Event, RLock
 from dataclasses import fields
 from datetime import datetime
@@ -252,24 +252,27 @@ def _run_item(engine, journal, job, item, request, mode, control, halt_new):
             return False, False
         if journal.failure is not None:
             raise JournalCommitError('저널 오류 이후 새 파일 처리를 중단합니다.')
-    for stage in ('main', 'output', 'source_remove'):
-        with journal.lock:
-            current_mode = mode if job.ledger[item.item_id][stage]['state'] == 'FAILED' else ('initial' if mode == 'initial' else 'continue')
-            actions = build_resume_plan(job, current_mode, items=[item])
-            action = next((a for a in actions if a.item_id == item.item_id and a.stage == stage), None)
-            if action is None or not action.allowed or action.action != 'RUN':
-                if (mode == 'initial' and action is not None and action.action == 'BLOCK'
-                        and job.ledger[item.item_id][stage]['state'] == 'PENDING'):
-                    _save(journal, job, item, stage, _record('FAILED', str(uuid4()), message=action.reason))
-                    if stage == 'output':
-                        halt_new.set()
-                    return True, stage == 'output'
-                continue
-        if not _run_stage(engine, journal, job, item, stage, request, mode):
-            if stage == 'output':
-                halt_new.set()
-            return True, stage == 'output'
-    return True, False
+    with (control.file_activity(item.item_id, item.source_path, 'copy') if control is not None else nullcontext()):
+        for stage in ('main', 'output', 'source_remove'):
+            with journal.lock:
+                current_mode = mode if job.ledger[item.item_id][stage]['state'] == 'FAILED' else ('initial' if mode == 'initial' else 'continue')
+                actions = build_resume_plan(job, current_mode, items=[item])
+                action = next((a for a in actions if a.item_id == item.item_id and a.stage == stage), None)
+                if action is None or not action.allowed or action.action != 'RUN':
+                    if (mode == 'initial' and action is not None and action.action == 'BLOCK'
+                            and job.ledger[item.item_id][stage]['state'] == 'PENDING'):
+                        _save(journal, job, item, stage, _record('FAILED', str(uuid4()), message=action.reason))
+                        if stage == 'output':
+                            halt_new.set()
+                        return True, stage == 'output'
+                    continue
+            if control is not None:
+                control.update_file_activity(item.item_id, {'main': 'copy', 'output': 'output', 'source_remove': 'source_remove'}[stage])
+            if not _run_stage(engine, journal, job, item, stage, request, mode):
+                if stage == 'output':
+                    halt_new.set()
+                return True, stage == 'output'
+        return True, False
 
 
 def _assert_unique_destinations(items):
@@ -334,12 +337,23 @@ def execute_job(engine, job, mode='initial', progress_callback=None, control=Non
                     except BaseException as exc:
                         halt_new.set()
                         fatal = fatal or exc
+                        if control is not None:
+                            control.report_file_result(item.item_id, item.source_path, 'UNCERTAIN', str(exc))
                         continue
                     if not started:
                         skipped.append(item)
                     else:
                         completed += 1
                         output_failed = output_failed or failed
+                        if control is not None:
+                            records = tuple(job.ledger[item.item_id].values())
+                            states = {record['state'] for record in records}
+                            status = ('UNCERTAIN' if states & {'UNCERTAIN', 'IN_PROGRESS'} else
+                                      'ERROR' if 'FAILED' in states else
+                                      'INCOMPLETE' if 'PENDING' in states else 'SUCCESS')
+                            message = '; '.join(record.get('message', '') for record in records
+                                                if record.get('message') and record['state'] not in {'DONE', 'NOT_APPLICABLE'})
+                            control.report_file_result(item.item_id, item.source_path, status, message)
                         # Progress is emitted only by the coordinator, never a photo worker.
                         engine._report_progress(progress_callback, '복구 단계 실행 중', completed, len(items))
                 if fatal is not None:
