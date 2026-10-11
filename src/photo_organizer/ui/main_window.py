@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QCloseEvent, QImageReader, QPixmap
+from PySide6.QtGui import QColor, QCloseEvent, QImageReader, QPixmap, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -25,11 +25,11 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +42,8 @@ from ..video_thumbnail import extract_video_thumbnail_bytes
 from .model_selection import ModelSelectionPanel
 from .job_controller import JobControllerMixin
 from .operation_controller import OperationControllerMixin
+from .responsive_layout import FlowLayout, ElidedLabel
+from .dock_panels import DockPanelsMixin
 from ..operation_control import OperationStopped
 from ..model_mapping import model_mapping_signature
 from ..video_output import VIDEO_QUALITY_PRESETS, normalize_video_quality, video_quality_display_label
@@ -393,7 +395,7 @@ class SettingsDialog(QDialog):
         )
 
 
-class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
+class MainWindow(DockPanelsMixin, OperationControllerMixin, JobControllerMixin, QMainWindow):
     def __init__(self, engine: OrganizerEngine, config_manager: ConfigManager) -> None:
         super().__init__()
         self.engine = engine
@@ -411,6 +413,8 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self._preview_metadata_fingerprints: dict[str, tuple[int, int] | None] = {}
         self._results_detail_column = 3
         self._busy = False
+        self._short_workspace = False
+        self._details_auto_restore = False
         self._init_job_controller()
         self._init_operation_controller()
 
@@ -425,11 +429,29 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         for line_edit in (self.source_edit, self.target_edit, self.device_name_edit):
             line_edit.textChanged.connect(lambda _text: self._job_mark_changed())
         self._restore_recent_job()
+        self._update_workspace_mode()
+        from .view_preferences import ViewPreferences
+        preferences_path = (self.config_manager.base_dir / 'view_preferences.json'
+                            if isinstance(self.config_manager, ConfigManager) else None)
+        self._view_preferences = ViewPreferences(self, preferences_path)
+        self._view_preferences.restore()
+        self._update_workspace_mode(force_compact=True)
 
     def _build_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(6)
+        self.setFont(QFont('Malgun Gothic', 10))
+        self.setStyleSheet('''
+            QMainWindow, QWidget { color: #212529; }
+            QLineEdit, QPlainTextEdit, QTableWidget { background: #ffffff; }
+            QPushButton, QToolButton { padding: 3px 8px; }
+            QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid #0066cc; }
+            QPushButton:disabled, QToolButton:disabled { color: #85898e; }
+            QHeaderView::section { background: #f3f4f5; padding: 4px; border: 0; border-bottom: 1px solid #d5d8dc; }
+        ''')
 
         form_layout = QFormLayout()
         self.source_edit = QLineEdit()
@@ -450,9 +472,11 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         target_button.clicked.connect(lambda: self._select_directory(self.target_edit))
 
         source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 0, 0, 0)
         source_row.addWidget(self.source_edit)
         source_row.addWidget(source_button)
         target_row = QHBoxLayout()
+        target_row.setContentsMargins(0, 0, 0, 0)
         target_row.addWidget(self.target_edit)
         target_row.addWidget(target_button)
 
@@ -463,16 +487,30 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
 
         form_layout.addRow("Source 경로", source_wrapper)
         form_layout.addRow("Target 경로", target_wrapper)
-        form_layout.addRow("디바이스명(선택)", self.device_name_edit)
-        self.device_name_hint = QLabel()
-        self.device_name_hint.setWordWrap(True)
-        form_layout.addRow("", self.device_name_hint)
-        form_layout.addRow("처리 모드", self.mode_combo)
         layout.addLayout(form_layout)
+        self.additional_options_panel = QWidget()
+        options_form = QFormLayout(self.additional_options_panel)
+        options_form.setContentsMargins(0, 0, 0, 0)
+        options_form.addRow("디바이스명(선택)", self.device_name_edit)
+        self.device_name_hint = ElidedLabel()
+        options_form.addRow("", self.device_name_hint)
+        options_form.addRow("처리 모드", self.mode_combo)
+        layout.addWidget(self.additional_options_panel)
+        self.additional_options_panel.hide()
+        self.additional_options_toggle = QToolButton()
+        self.additional_options_toggle.setText('추가 옵션')
+        self.additional_options_toggle.setCheckable(True)
+        self.additional_options_toggle.toggled.connect(self.additional_options_panel.setVisible)
+        self.mode_combo.currentTextChanged.connect(self._update_additional_options_state)
+        self.details_toggle = QToolButton()
+        self.details_toggle.setText('상세 보기')
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setChecked(True)
+        self.details_toggle.toggled.connect(self._set_details_visible)
 
         self._build_job_controls(layout)
 
-        button_row = QHBoxLayout()
+        button_row = FlowLayout()
         self.preview_button = QPushButton("미리보기")
         self.execute_button = QPushButton("실행")
         self.delete_button = QPushButton("삭제 리뷰 실행")
@@ -495,19 +533,16 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.phone_transfer_button = QPushButton("모바일로 복사")
         self.phone_transfer_button.clicked.connect(self._open_phone_transfer)
         button_row.addWidget(self.phone_transfer_button)
-        button_row.addStretch(1)
-        self.mobile_output_summary = QLabel()
-        self.mobile_output_summary.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.mobile_output_summary.setWordWrap(True)
+        self.mobile_output_summary = ElidedLabel()
+        self.mobile_output_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.mobile_output_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.settings_button = QPushButton("환경설정")
         self.settings_button.clicked.connect(self._open_settings_dialog)
-        button_row.addWidget(self.mobile_output_summary, 1)
         button_row.addWidget(self.settings_button)
         layout.addLayout(button_row)
+        layout.addWidget(self.mobile_output_summary)
 
-        self.status_label = QLabel("초기/미선택")
-        self.status_label.setWordWrap(True)
+        self.status_label = ElidedLabel("초기/미선택")
         layout.addWidget(self.status_label)
 
         self.progress_bar = QProgressBar()
@@ -516,11 +551,9 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.progress_bar.setFormat("대기 중")
         layout.addWidget(self.progress_bar)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        layout.addWidget(splitter, 1)
         self.tabs = QTabWidget()
-        splitter.addWidget(self.tabs)
+        self.tabs.setMinimumSize(0, 150)
+        layout.addWidget(self.tabs, 1)
 
         self.preview_table = self._build_table(["원본 경로", "대상 경로", "처리 방식", "새 파일명", "일시 근거", "모델명 근거", "안내/오류", "영상 모델 조회"])
         self.preview_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -542,15 +575,9 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.tabs.addTab(self.error_table, "오류")
         self.tabs.addTab(self.delete_table, "삭제 리뷰")
 
-        self.selection_splitter = QSplitter(Qt.Horizontal)
-        self.selection_splitter.setChildrenCollapsible(False)
         self.selection_image_panel = self._build_selection_image_panel()
         self.selection_detail_panel = self._build_selection_detail_panel()
-        self.selection_splitter.addWidget(self.selection_image_panel)
-        self.selection_splitter.addWidget(self.selection_detail_panel)
-        self.selection_splitter.setStretchFactor(0, 1)
-        self.selection_splitter.setStretchFactor(1, 2)
-        splitter.addWidget(self.selection_splitter)
+        self._build_dock_panels()
 
         self.preview_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("preview"))
         self.preview_table.itemClicked.connect(self._handle_preview_item_clicked)
@@ -563,6 +590,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
     def _build_table(self, headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
+        table.verticalHeader().setDefaultSectionSize(26)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -583,30 +611,24 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        title = QLabel("선택 파일 이미지")
-        title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(title)
-
         self.preview_image_scroll = QScrollArea()
         self.preview_image_scroll.setWidgetResizable(True)
-        self.preview_image_scroll.setMinimumWidth(320)
-        self.preview_image_scroll.setMinimumHeight(220)
+        self.preview_image_scroll.setMinimumSize(120, 60)
 
         self.preview_image_view = QLabel()
         self.preview_image_view.setAlignment(Qt.AlignCenter)
         self.preview_image_view.setWordWrap(True)
-        self.preview_image_view.setMinimumSize(280, 200)
+        self.preview_image_view.setMinimumSize(80, 40)
         self.preview_image_view.setStyleSheet(
             "QLabel { border: 1px solid #9aa0a6; background: #1f1f1f; color: #d0d0d0; padding: 12px; }"
         )
         self.preview_image_scroll.setWidget(self.preview_image_view)
         layout.addWidget(self.preview_image_scroll, 1)
 
-        self.preview_image_info = QLabel("사진 파일은 축소 로드하고, 영상 파일은 썸네일을 추출해 표시합니다.")
-        self.preview_image_info.setWordWrap(True)
+        self.preview_image_info = ElidedLabel("사진 파일은 축소 로드하고, 영상 파일은 썸네일을 추출해 표시합니다.")
         self.preview_image_info.setStyleSheet("color: #666;")
         layout.addWidget(self.preview_image_info)
-        self._set_preview_image_placeholder("미리보기에서 사진을 선택하면 왼쪽에 이미지가 표시됩니다.")
+        self._set_preview_image_placeholder("목록에서 파일을 선택하면 이미지 영역에 미리보기가 표시됩니다.")
         return panel
 
     def _build_selection_detail_panel(self) -> QWidget:
@@ -615,19 +637,15 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        info_title = QLabel("선택 항목 정보")
-        info_title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(info_title)
+        self.detail_tabs = QTabWidget()
+        self.detail_tabs.setMinimumSize(80, 70)
+        layout.addWidget(self.detail_tabs, 1)
 
         self.selection_detail = QPlainTextEdit()
         self.selection_detail.setReadOnly(True)
         self.selection_detail.setPlaceholderText("선택한 항목의 전체 경로와 세부 내용이 여기에 표시됩니다.")
-        self.selection_detail.setMinimumHeight(140)
-        layout.addWidget(self.selection_detail)
-
-        metadata_title = QLabel("메타정보")
-        metadata_title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(metadata_title)
+        self.selection_detail.setMinimumSize(40, 30)
+        self.detail_tabs.addTab(self.selection_detail, '상세 정보')
 
         self.selection_metadata_table = QTableWidget(0, 2)
         self.selection_metadata_table.setHorizontalHeaderLabels(["항목", "값"])
@@ -644,13 +662,32 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         metadata_header.setSectionResizeMode(0, QHeaderView.Interactive)
         metadata_header.setSectionResizeMode(1, QHeaderView.Stretch)
         self.selection_metadata_table.setColumnWidth(0, 180)
-        self.selection_metadata_table.setMinimumHeight(180)
-        layout.addWidget(self.selection_metadata_table, 1)
+        self.selection_metadata_table.setMinimumSize(40, 30)
+        self.detail_tabs.addTab(self.selection_metadata_table, '메타정보')
 
         return panel
 
+    def _set_details_visible(self, visible):
+        if hasattr(self, 'image_dock'):
+            self._set_all_docks_visible(visible)
+
+    def _update_workspace_mode(self, force_compact=False):
+        if not hasattr(self, 'image_dock'):
+            return
+        short = self.height() < 520
+        self.centralWidget().layout().setSpacing(4 if short else 6)
+        self.centralWidget().layout().setContentsMargins(8, 4 if short else 6, 8, 4 if short else 8)
+        if force_compact:
+            self._short_workspace = False
+        self._update_dock_layout()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_workspace_mode()
+
     def _build_delete_table(self) -> QTableWidget:
         table = QTableWidget(0, 3)
+        table.verticalHeader().setDefaultSectionSize(26)
         table.setHorizontalHeaderLabels(["선택", "삭제 대상", "사유"])
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -805,6 +842,7 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self._update_device_name_hint(text)
 
     def _update_device_name_hint(self, text: str) -> None:
+        self._update_additional_options_state()
         override = text.strip()
         if override:
             self.device_name_hint.setText(f"현재 모델명 override 활성화: 이번 작업 전체에 `{override}` 를 우선 적용합니다.")
@@ -812,6 +850,16 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
             return
         self.device_name_hint.setText("현재는 메타데이터와 파일명 fallback 기준으로 모델명을 자동 추출합니다.")
         self.device_name_hint.setStyleSheet("color: #666;")
+
+    def _update_additional_options_state(self, _value=None):
+        if not hasattr(self, 'additional_options_toggle'):
+            return
+        override = self.device_name_edit.text().strip()
+        moving = self.mode_combo.currentText() == 'move'
+        flags = (['이동'] if moving else []) + (['기기 지정'] if override else [])
+        self.additional_options_toggle.setText('추가 옵션' + (' (' + ', '.join(flags) + ')' if flags else ''))
+        self.additional_options_toggle.setToolTip(
+            '처리 방식: ' + ('이동' if moving else '복사') + '\n기기 모델명: ' + (override or '메타데이터/파일명에서 자동 추출'))
 
     def _build_request(self, preview_only: bool) -> OrganizeRequest | None:
         source = Path(self.source_edit.text().strip())
@@ -1561,6 +1609,8 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         self.status_label.setText(text)
 
     def _set_busy(self, busy: bool) -> None:
+        self.selection_detail_panel.setEnabled(not busy)
+        self.selection_image_panel.setEnabled(not busy)
         self._busy = busy
         self.model_selection_panel.setEnabled(not busy and self.last_execution_bundle is None and bool(self.last_preview_bundle and self.last_preview_bundle.preview_items))
         self.preview_table.setEnabled(not busy)
@@ -1603,6 +1653,8 @@ class MainWindow(OperationControllerMixin, JobControllerMixin, QMainWindow):
         if self._busy or not self._confirm_job_transition():
             event.ignore()
             return
+        if hasattr(self, '_view_preferences'):
+            self._view_preferences.save()
         self._job_timer.stop()
         if self._global_settings.autosave_job_changes:
             self._autosave_job()
