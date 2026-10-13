@@ -37,6 +37,8 @@ class AppSettings:
     video_encoder: str = "auto"
     conversion_speed: str = "balanced"
     photo_workers: int = 2
+    video_workers: int = 1
+    mixed_media_workers: bool = False
 
 
 @dataclass(slots=True)
@@ -61,6 +63,8 @@ class OrganizeRequest:
     video_encoder: str = "auto"
     conversion_speed: str = "balanced"
     photo_workers: int = 2
+    video_workers: int = 1
+    mixed_media_workers: bool = False
 
 
 @dataclass(slots=True)
@@ -102,6 +106,7 @@ class PreviewItem:
     included: bool = True
     output_model_name: str = ""
     folder_model_name: str = ""
+    file_selected: bool = True
 
 
 @dataclass(slots=True)
@@ -149,6 +154,9 @@ class PreviewBundle:
     selection_applied: bool = False
     model_name_mappings: dict[str, str] = field(default_factory=dict)
     model_mapping_scope: str = "filename_and_folders"
+
+    # None denotes pre-feature snapshots: model selection is derived from included.
+    selected_models: list[str] | None = None
 
 
 @dataclass(slots=True)

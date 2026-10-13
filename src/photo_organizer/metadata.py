@@ -39,6 +39,20 @@ class MetadataExtractor:
             self._extract_photo_metadata(item)
         else:
             self._extract_video_metadata(item)
+        if not item.model_name:
+            try:
+                from .metadata_writer import read_exiftool_model
+                model = read_exiftool_model(path)
+                if model:
+                    item.model_name = sanitize_model_name(model)
+                    item.model_source = "사진 메타" if media_type == "photo" else "영상 메타"
+                    self._set_display_metadata(item, "photo_model" if media_type == "photo" else "video_model", model)
+                    if media_type == "video":
+                        lookup = item.metadata.setdefault("video_model_lookup", {})
+                        lookup.update(status="found", model=model)
+                        lookup.setdefault("tools", {})["exiftool"] = {"status": "success", "detail": "모델 태그 보완"}
+            except Exception as exc:
+                item.warnings.append(f"모델 태그 보완 실패(ExifTool): {exc}")
         self._apply_filename_fallback(item)
         return item
 
@@ -135,6 +149,8 @@ class MetadataExtractor:
             item.model_source = "파일명 fallback"
         if fallback_source != "UNKNOWN":
             item.metadata["filename_pattern"] = fallback_source
+        if fallback_source == "YYYYMMDD_HHMMSS_NUMERIC_SUFFIX":
+            item.metadata["filename_model_notice"] = "파일명의 숫자 전용 접미사는 모델명으로 사용하지 않음"
 
     def _apply_photo_tags(self, item: MediaItem, tags: dict[str, Any]) -> None:
         self._record_source_metadata(item, "exifread", tags)
@@ -186,7 +202,7 @@ class MetadataExtractor:
                 item.datetime_source = "사진 메타"
                 break
         raw_model = exif_dict.get("0th", {}).get(piexif.ImageIFD.Model)
-        if raw_model:
+        if raw_model and not item.model_name:
             text = raw_model.decode("utf-8") if isinstance(raw_model, bytes) else str(raw_model)
             item.model_name = sanitize_model_name(text)
             item.model_source = "사진 메타"

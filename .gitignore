@@ -25,6 +25,12 @@ env/
 config.toml
 settings.json
 view_preferences.json
+phone_locations.json
+phone_view_preferences.json
+
+# Reproducible ExifTool runtime is verified/downloaded with scripts/vendor_exiftool.py.
+tools/exiftool/exiftool.exe
+tools/exiftool/exiftool_files/
 execution_estimates.json
 *.sqlite
 *.sqlite3

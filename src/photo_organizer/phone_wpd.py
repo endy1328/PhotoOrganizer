@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 from collections import deque
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -25,6 +26,22 @@ class WpdBackend:
         self._owner: int | None = None
         self._messages: queue.Queue[str | None] = queue.Queue()
         self._errors: deque[str] = deque(maxlen=20)
+        self._activity_callback: Callable[[str, bool], None] | None = None
+        self._activity_phase = 'prepare'
+        self._activity_cancellable = True
+
+    def set_activity_callback(self, callback: Callable[[str, bool], None] | None) -> None:
+        """Optional observational callback; it cannot change transport safety decisions."""
+        if callback is not None and not callable(callback):
+            raise TypeError('activity callback must be callable or None')
+        self._activity_callback = callback
+
+    def _notify_activity(self, phase: str, cancellable: bool) -> None:
+        if self._activity_callback is not None:
+            try:
+                self._activity_callback(phase, cancellable)
+            except Exception:
+                logging.getLogger(__name__).warning('휴대폰 전송 단계 표시 실패', exc_info=True)
 
     def __enter__(self):
         self._ensure_started()
@@ -97,9 +114,13 @@ class WpdBackend:
 
     def _receive(self, timeout: float, cancelled: Callable[[], bool] | None = None) -> dict:
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        waiting_reported = False
+        while (now := time.monotonic()) < deadline:
+            if not waiting_reported and now >= deadline - timeout + 2:
+                self._notify_activity('waiting:' + self._activity_phase, self._activity_cancellable)
+                waiting_reported = True
             try:
-                line = self._messages.get(timeout=min(.1, max(.001, deadline - time.monotonic())))
+                line = self._messages.get(timeout=min(.1, max(.001, deadline - now)))
             except queue.Empty:
                 continue
             if line is None:
@@ -123,6 +144,9 @@ class WpdBackend:
         return message.get("result")
 
     def _progress(self, message: dict, progress: Callable[[int], None], cancelled: Callable[[], bool]) -> None:
+        self._activity_phase = str(message.get('phase', 'write'))
+        self._activity_cancellable = message.get('cancellable', True) is not False
+        self._notify_activity(self._activity_phase, self._activity_cancellable)
         try:
             progress(int(message["bytes"]))
             proceed = message.get("cancellable", True) is False or not cancelled()
@@ -135,6 +159,8 @@ class WpdBackend:
         if self._owner is not None and self._owner != threading.get_ident():
             raise RuntimeError("WPD 세션은 생성한 작업 스레드에서만 사용할 수 있습니다.")
         try:
+            self._activity_phase, self._activity_cancellable = operation, True
+            self._notify_activity(operation, True)
             self._ensure_started()
             self._send({"op": operation, **arguments})
             while True:

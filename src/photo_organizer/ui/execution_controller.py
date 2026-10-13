@@ -38,14 +38,19 @@ class ExecutionConfirmDialog(QDialog):
         self.summary_label = QLabel(
             f'사진 {estimate.photo_count}개 / 동영상 {estimate.video_count}개\n'
             f'처리 방식: {operation} / 사진 동시 처리: {settings.photo_workers}개\n'
+            f'동영상 동시 처리: {getattr(settings, "video_workers", 1)}개\n'
+            f'사진·영상 혼합 처리: {"사용" if getattr(settings, "mixed_media_workers", False) else "사용 안 함"}\n'
             f'영상 인코더: {encoder} / 모바일 출력: {"사용" if settings.mobile_output_enabled else "사용 안 함"}')
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
         self.estimate_label = QLabel('예상 소요 시간: ' + estimate_text(estimate))
         self.estimate_label.setWordWrap(True)
         layout.addWidget(self.estimate_label)
-        note = QLabel('초기 추정은 파일 크기·영상 길이·설정과 처리 이력을 기준으로 합니다. '
-                      '디스크와 GPU 상태에 따라 달라지며 실행 후 실제 속도로 보정합니다.\n\n진행하시겠습니까?')
+        note_text = ('초기 추정은 파일 크기·영상 길이·설정과 처리 이력을 기준으로 합니다. '
+                     '디스크와 GPU 상태에 따라 달라지며 실행 후 실제 속도로 보정합니다.')
+        if getattr(settings, 'video_workers', 1) == 2:
+            note_text += '\n동영상 2개 동시 처리의 초기 추정은 속도가 두 배 빨라진다고 가정하지 않습니다.'
+        note = QLabel(note_text + '\n\n진행하시겠습니까?')
         note.setWordWrap(True)
         layout.addWidget(note)
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -184,11 +189,11 @@ class ExecutionControllerMixin:
         remaining = remaining_estimate(self._execution_estimate, active_elapsed,
                                        completed_item_ids=self._execution_completed_ids, paused=paused)
         if control and control.stop_requested:
-            phase, eta = '중단 요청 중', '현재 파일 완료 후 중단'
+            phase, eta = '중단 중', '현재 처리 취소·임시 파일 정리'
         elif paused:
             phase, eta = '일시정지', '재개 후 보정'
         elif control and control.pause_requested:
-            phase, eta = '일시정지 요청 중', '현재 파일 완료 후 대기'
+            phase, eta = '일시정지 중', '현재 처리 취소·임시 파일 정리'
         else:
             phase = '실행 중'
             eta = ('0초' if self._execution_count >= self._execution_total else

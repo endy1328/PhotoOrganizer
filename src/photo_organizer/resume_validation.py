@@ -19,6 +19,8 @@ class ResumeAction:
 def build_resume_plan(job, mode='continue', *, items=None):
     if mode not in {'initial', 'continue', 'retry'}:
         raise ValueError('지원하지 않는 복구 방식입니다.')
+    if getattr(job, 'metadata_refresh_required', False):
+        raise ValueError('원본 메타정보 변경 후 새 미리보기가 필요합니다. 실행할 수 없습니다.')
     if items is not None:
         # The engine validates the complete immutable plan once under its execution lock.
         # Recheck just the current item's paths and three stage records before each mutation.

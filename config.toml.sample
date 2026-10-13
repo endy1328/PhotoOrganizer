@@ -2,6 +2,8 @@
 video_encoder = "auto"
 conversion_speed = "balanced"
 photo_workers = 2
+video_workers = 1
+mixed_media_workers = false
 restore_last_job = true
 autosave_job_changes = true
 source_path = "C:\\source"

@@ -25,9 +25,11 @@ def _valid_profile(profile):
     if type(profile) is not str or len(profile) > 128:
         return False
     fields = profile.split('|')
-    if len(fields) != 8:
+    if fields[-1:] == ['mixed_media_workers=true']:
+        fields = fields[:-1]
+    if len(fields) not in {8, 9} or (len(fields) == 9 and fields[8] != 'video_workers=2'):
         return False
-    encoder, speed, workers, output, quality, video_width, photo_width, jpeg_quality = fields
+    encoder, speed, workers, output, quality, video_width, photo_width, jpeg_quality = fields[:8]
     return (encoder in {'cpu', 'gpu', 'auto'} and speed in {'quality', 'balanced', 'fast'}
             and workers in {'1', '2', '4'} and output in {'0', '1'} and quality in _QUALITIES
             and all(value.isascii() and value.isdigit() for value in (video_width, photo_width, jpeg_quality))
@@ -117,6 +119,8 @@ def estimate_execution(preview_bundle, settings, *, source_fingerprints=None, le
     speed = speed if speed in {'quality', 'balanced', 'fast'} else 'balanced'
     workers = getattr(settings, 'photo_workers', 1)
     workers = workers if type(workers) is int and workers in {1, 2, 4} else 1
+    video_workers = getattr(settings, 'video_workers', 1)
+    video_workers = video_workers if type(video_workers) is int and video_workers in {1, 2} else 1
     output_enabled = bool(getattr(settings, 'mobile_output_enabled', False))
     quality = getattr(settings, 'mobile_output_video_quality', 'balanced')
     quality = quality if isinstance(quality, str) and quality in _QUALITIES else 'balanced'
@@ -124,6 +128,11 @@ def estimate_execution(preview_bundle, settings, *, source_fingerprints=None, le
     photo_width = _setting_int(settings, 'mobile_output_max_width', 3000)
     jpeg_quality = _setting_int(settings, 'mobile_output_jpeg_quality', 75, 1, 100)
     profile = f'{encoder}|{speed}|{workers}|{int(output_enabled)}|{quality}|{video_width}|{photo_width}|{jpeg_quality}'
+    if video_workers != 1:
+        profile += f'|video_workers={video_workers}'
+    mixed = getattr(settings, 'mixed_media_workers', False) is True
+    if mixed:
+        profile += '|mixed_media_workers=true'
     raw_media = getattr(preview_bundle, 'media_items', [])
     media = {str(item.source_path): item for item in raw_media} if isinstance(raw_media, (list, tuple)) else {}
     estimates, missing = [], 0
@@ -193,6 +202,10 @@ def estimate_execution(preview_bundle, settings, *, source_fingerprints=None, le
     notes = ('저장 장치·영상 장면·해상도·다른 작업에 따라 실제 시간은 범위를 벗어날 수 있습니다.',)
     if encoder == 'auto':
         notes += ('자동 인코더는 추가 GPU 검사 없이 CPU 기준으로 추정합니다.',)
+    if video_workers == 2:
+        notes += ('동영상 2개 동시 처리의 초기 추정은 속도가 두 배 빨라진다고 가정하지 않습니다. 실제 처리 이력으로 보정합니다.',)
+    if mixed:
+        notes += ('사진·영상 혼합 처리의 초기 추정은 동시 실행 비율을 단정하지 않습니다. 같은 설정의 실제 처리 이력으로 보정합니다.',)
     return ExecutionEstimate(total, total * lower, total * upper,
                              '처리 이력 보정' if observed else '초기 추정', tuple(estimates),
                              sum(item.media_type == 'photo' for item in estimates),

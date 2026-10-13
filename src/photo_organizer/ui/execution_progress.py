@@ -76,6 +76,7 @@ class ExecutionProgressPanel(QDockWidget):
         table.verticalHeader().setDefaultSectionSize(25)
         table.verticalHeader().hide()
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        table.horizontalHeader().setSectionsMovable(True)
         table.setColumnWidth(0, 210)
         table.setColumnWidth(1, 95)
         table.setColumnWidth(2, 90)

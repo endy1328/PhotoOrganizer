@@ -103,7 +103,7 @@ class ModelSelectionPanel(QWidget):
         header.addWidget(self.summary_label, 1)
         self.setEnabled(False)
 
-    def set_items(self, items) -> None:
+    def set_items(self, items, selected_models=None) -> None:
         while self.flow_layout.count():
             child = self.flow_layout.takeAt(0)
             if child.widget() is not None:
@@ -122,7 +122,7 @@ class ModelSelectionPanel(QWidget):
             box.toggled.connect(self._changed)
             self.flow_layout.addWidget(box)
             self.checkboxes[model] = box
-        self.refresh(items)
+        self.refresh(items, selected_models)
 
     def _set_expanded(self, expanded: bool) -> None:
         self.scroll_area.setVisible(expanded)
@@ -131,8 +131,9 @@ class ModelSelectionPanel(QWidget):
     def selected_models(self) -> set[str]:
         return {model for model, box in self.checkboxes.items() if box.isChecked()}
 
-    def refresh(self, items) -> None:
-        selected = {item.model_name for item in items if getattr(item, "included", True)}
+    def refresh(self, items, selected_models=None) -> None:
+        selected = (set(selected_models) if selected_models is not None else
+                    {item.model_name for item in items if getattr(item, "included", True)})
         for model, box in self.checkboxes.items():
             box.blockSignals(True)
             box.setChecked(model in selected)

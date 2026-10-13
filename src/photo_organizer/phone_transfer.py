@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import logging
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
 from .models import VIDEO_EXTENSIONS
+from .metadata_writer import is_metadata_storage
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,21 @@ class OutputFolder:
     files: tuple[Path, ...]
     size: int
     directories: tuple[Path, ...] = ()
+    relative_parts: tuple[str, ...] = ()
+
+
+def output_relative_parts(folder: OutputFolder) -> tuple[str, ...]:
+    """Validate frozen Target-relative destination, or legacy flat folder name."""
+    parts = getattr(folder, 'relative_parts', ())
+    if type(parts) is not tuple:
+        raise ValueError('출력 상대 경로는 경로 구성요소 튜플이어야 합니다.')
+    parts = parts or (folder.path.name,)
+    if any(type(part) is not str or not part.strip() or part in {'.', '..'}
+           or any(char in part for char in '/\\:\x00') for part in parts):
+        raise ValueError('출력 상대 경로에 유효하지 않은 구성요소가 있습니다.')
+    if parts[-1] != folder.path.name or tuple(folder.path.parts[-len(parts):]) != parts:
+        raise ValueError('출력 상대 경로가 실제 출력 폴더와 일치하지 않습니다.')
+    return parts
 
 
 @dataclass(frozen=True)
@@ -81,7 +98,7 @@ def scan_outputs(target: Path) -> list[OutputFolder]:
 
         def visit(directory: Path) -> None:
             for path in _children(directory):
-                if _temporary(path.name) or _is_link(path):
+                if _temporary(path.name) or _is_link(path) or is_metadata_storage(path):
                     continue
                 if path.is_dir():
                     directories.append(path)
@@ -90,16 +107,20 @@ def scan_outputs(target: Path) -> list[OutputFolder]:
                     files.append(path)
 
         visit(root)
-        return OutputFolder(root, tuple(files), sum(p.stat().st_size for p in files), tuple(directories))
+        folder = OutputFolder(root, tuple(files), sum(p.stat().st_size for p in files), tuple(directories),
+                              root.relative_to(target).parts)
+        output_relative_parts(folder)
+        return folder
 
     def find(directory: Path) -> None:
         for path in _children(directory):
-            if _temporary(path.name) or _is_link(path) or not path.is_dir():
+            if _temporary(path.name) or _is_link(path) or not path.is_dir() or is_metadata_storage(path):
                 continue
             if path.name.casefold().startswith('output_'):
-                if path.name.casefold() in names:
-                    raise ValueError(f'같은 이름의 출력 폴더가 여러 곳에 있습니다: {path.name}. 별도 Target을 선택해 주세요.')
-                names.add(path.name.casefold())
+                key = '/'.join(path.relative_to(target).parts).casefold()
+                if key in names:
+                    raise ValueError(f'동일한 출력 상대 경로가 중복됩니다: {key}')
+                names.add(key)
                 outputs.append(collect(path))
             else:
                 find(path)
@@ -154,7 +175,7 @@ def plan_video_transfer(folders: list[OutputFolder], limit_video_bytes: int | No
                 parent = parent.parent
         if files:
             ordered = tuple(sorted(directories, key=lambda p: (len(p.parts), str(p).casefold())))
-            eligible.append(OutputFolder(folder.path, tuple(files), total_size, ordered))
+            eligible.append(OutputFolder(folder.path, tuple(files), total_size, ordered, getattr(folder, 'relative_parts', ())))
     return eligible, excluded
 
 
@@ -175,6 +196,10 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
     """
     if conflict_policy not in {'overwrite', 'skip', 'rename'}:
         raise ValueError('지원하지 않는 휴대폰 동일 이름 처리 설정입니다.')
+    relative_paths = [output_relative_parts(folder) for folder in folders]
+    keys = [tuple(part.casefold() for part in parts) for parts in relative_paths]
+    if len(keys) != len(set(keys)):
+        raise ValueError('동일한 출력 상대 경로가 중복됩니다.')
     cancelled = cancelled or (lambda: False)
     progress = progress or (lambda update: None)
     folders, excluded = plan_video_transfer(folders, limit_video_bytes)
@@ -191,20 +216,52 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
     completed = len(excluded)
     written_bytes = 0
     stopped: tuple[str, str] | None = None
+    children_cache: dict[str, list[RemoteEntry]] = {}
+    lookup_count = 0
+    lookup_seconds = 0.0
+
+    def children_for(parent: str) -> list[RemoteEntry]:
+        nonlocal lookup_count, lookup_seconds
+        if parent not in children_cache:
+            started = time.perf_counter()
+            lookup_count += 1
+            try:
+                children_cache[parent] = list(backend.list_children(parent))
+            finally:
+                lookup_seconds += time.perf_counter() - started
+        return children_cache[parent]
+
+    def remember(parent: str, entry: RemoteEntry, replaced_id: str | None = None) -> None:
+        existing = children_cache.get(parent, [])
+        children_cache[parent] = [old for old in existing
+                                  if old.id != entry.id and old.id != replaced_id] + [entry]
 
     def notify(source: Path) -> None:
         progress({'file': str(source), 'bytes': written_bytes, 'total_bytes': total_bytes,
-                  'completed': completed, 'total_files': total_files})
+                  'completed': completed, 'total_files': total_files,
+                  'lookup_count': lookup_count, 'lookup_seconds': lookup_seconds})
 
     def ensure_folder(parent: str, name: str) -> str:
-        matches = [entry for entry in backend.list_children(parent) if entry.name.casefold() == name.casefold()]
+        if cancelled():
+            raise InterruptedError('사용자가 전송을 취소했습니다.')
+        matches = [entry for entry in children_for(parent) if entry.name.casefold() == name.casefold()]
+        if cancelled():
+            raise InterruptedError('사용자가 전송을 취소했습니다.')
         if matches:
             if len(matches) != 1 or not matches[0].is_folder:
                 raise ValueError(f'대상 폴더 이름 충돌: {name}')
             return matches[0].id
-        created = backend.create_folder(parent, name)
+        try:
+            created = backend.create_folder(parent, name)
+        except FileExistsError:
+            children_cache.pop(parent, None)
+            matches = [entry for entry in children_for(parent) if entry.name.casefold() == name.casefold()]
+            if len(matches) != 1 or not matches[0].is_folder:
+                raise ValueError(f'대상 폴더 이름 충돌: {name}')
+            return matches[0].id
         if not created.is_folder or created.name.casefold() != name.casefold() or not created.id:
             raise OSError(f'휴대폰 폴더 생성 결과를 확인하지 못했습니다: {name}')
+        remember(parent, created)
         return created.id
 
     for result in excluded:
@@ -221,7 +278,12 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
                 _check_ancestors(folder.path)
                 if not folder.path.is_dir():
                     raise ValueError('출력 폴더가 변경되었거나 링크입니다. 목록을 다시 조회해 주세요.')
-                parents[folder.path] = ensure_folder(parent_id, folder.path.name)
+                parent = parent_id
+                for name in output_relative_parts(folder):
+                    if cancelled():
+                        raise InterruptedError('사용자가 전송을 취소했습니다.')
+                    parent = ensure_folder(parent, name)
+                parents[folder.path] = parent
                 for directory in folder.directories:
                     if cancelled():
                         raise InterruptedError('사용자가 전송을 취소했습니다.')
@@ -278,7 +340,7 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
                     for attempt in range(20):
                         if cancelled():
                             raise InterruptedError('사용자가 전송을 취소했습니다.')
-                        children = backend.list_children(parent)
+                        children = children_for(parent)
                         # Recheck after phone discovery, before skip/rename/overwrite or upload.
                         exclusion = _size_exclusion(source, source.stat().st_size, limit_video_bytes)
                         if exclusion:
@@ -301,15 +363,17 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
                             else:
                                 raise ValueError('새 이름 순번이 9999를 초과했습니다.')
                         upload_started = True
-                        if matches and conflict_policy == 'overwrite':
-                            replaced = True
-                            entry = backend.overwrite_file(parent, source.name, source, advance, cancelled, matches[0].id)
-                        else:
-                            try:
+                        try:
+                            if matches and conflict_policy == 'overwrite':
+                                replaced = True
+                                entry = backend.overwrite_file(parent, source.name, source, advance, cancelled, matches[0].id)
+                            else:
+                                replaced = False
                                 entry = backend.upload_new(parent, destination_name, source, advance, cancelled)
-                            except FileExistsError:
-                                upload_started = False
-                                continue  # Re-evaluate policy when a concurrent writer creates the name.
+                        except FileExistsError:
+                            upload_started = False
+                            children_cache.pop(parent, None)
+                            continue  # Helper final checks detected a stale policy snapshot.
                         break
                     else:
                         raise ValueError('전송 중 이름 충돌이 반복되었습니다. 목록을 다시 조회해 주세요.')
@@ -320,6 +384,10 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
                         verified = (entry.id and not entry.is_folder and entry.name == destination_name
                                     and entry.size == before.st_size and before.st_size == after.st_size
                                     and before.st_mtime_ns == after.st_mtime_ns)
+                        if verified:
+                            remember(parent, entry, matches[0].id if replaced else None)
+                        else:
+                            children_cache.pop(parent, None)
                         success_message = '덮어쓰기 완료 및 파일 크기 확인' if replaced else (
                             f'새 이름으로 복사: {destination_name} (파일 크기 확인)' if destination_name != source.name
                             else '전송 완료 및 파일 크기 확인')
@@ -353,4 +421,6 @@ def transfer_outputs(backend: TransferBackend, parent_id: str, folders: list[Out
             else:
                 status, message = 'COPIED', '빈 폴더 생성/확인'
             results.append(TransferResult(folder.path, status, message or ''))
+    logger.info('휴대폰 정책 목록 조회: %d회 / %.3f초 (WPD 내부 최종 검증 조회 제외)',
+                lookup_count, lookup_seconds)
     return results

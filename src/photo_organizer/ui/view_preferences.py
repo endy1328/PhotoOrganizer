@@ -19,6 +19,13 @@ class ViewPreferences:
         self.path = path
         self.tables = {name: getattr(window, name) for name in
                        ('preview_table', 'results_table', 'error_table', 'delete_table')}
+        metadata = getattr(window, 'selection_metadata_table', None)
+        if metadata is not None:
+            self.tables['selection_metadata_table'] = metadata
+        progress = getattr(window, 'execution_progress_dock', None)
+        if progress is not None:
+            self.tables['execution_active_table'] = progress.active_table
+            self.tables['execution_history_table'] = progress.history_table
         self.menus = {}
         self._widths = {}
         for name, table in self.tables.items():
@@ -72,9 +79,21 @@ class ViewPreferences:
                 saved = {}
             count = table.columnCount()
             order = saved.get('order')
-            if not (isinstance(order, list) and len(order) == count and
-                    all(type(i) is int for i in order) and sorted(order) == list(range(count))):
-                order = [3, 2, 6, 5, 0, 1, 4, 7] if name == 'preview_table' and count == 8 else list(range(count))
+            valid_order = lambda value, size: (isinstance(value, list) and len(value) == size and
+                                               all(type(i) is int for i in value) and sorted(value) == list(range(size)))
+            if name == 'preview_table' and count == 10 and valid_order(order, 8):
+                order = [9] + order + [8]
+            elif name == 'preview_table' and count == 10 and valid_order(order, 9):
+                order = [9] + order
+            elif name == 'preview_table' and count == 9 and valid_order(order, 8):
+                order = order + [8]
+            elif not valid_order(order, count):
+                if name == 'preview_table' and count in (8, 9, 10):
+                    order = ([9] if count == 10 else []) + [3, 2, 6, 5, 0, 1, 4, 7] + ([8] if count >= 9 else [])
+                elif name == 'results_table' and count == 8:
+                    order = [0, 1, 2, 3, 4, 5, 7, 6]
+                else:
+                    order = list(range(count))
             header = table.horizontalHeader()
             for visual, logical in enumerate(order):
                 header.moveSection(header.visualIndex(logical), visual)

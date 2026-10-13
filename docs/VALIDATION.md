@@ -1,5 +1,136 @@
 # VALIDATION
 
+## 2026-10-13 Git 소스 스냅샷 사전 확인
+
+- `origin`은 `https://github.com/endy1328/PhotoOrganizer.git`이며 fetch 후 `20261013` 원격 브랜치가 없는 것을 확인했다. 현재 HEAD는 `82a6e463a86ece9373043d2bc700501caf3cd7ae`로 origin/20261012와 일치한다.
+- 대상 소스 버전은1.0.1.27이며 기존 전체770개 회귀 결과와 EXE 검증 기록을 확인했다. `git diff --check` 통과, 추적 목록에 EXE·Python 캐시·실행 설정·SQLite 없음. 커밋 대상은 명시적으로 소스·테스트·문서·빌드 설정과 ExifTool 재현 자료로 제한한다.
+- 반영 전 전체 회귀 재실행:770개/429.796초,768통과·Windows 심볼릭 링크 권한2skip·실패0·프로세스 종료0. 독립 staged94개 감사에서 비밀 정보·로컬 실행 데이터·빌드 산출물·주요 소스 누락을 발견하지 않았다. 새 테스트 파일 끝의 빈 줄1건을 정리한 후 `git diff --cached --check` 통과. 원격 반영은 사용자 요청한 새20261013 브랜치만 대상으로 하며 force push는 사용하지 않는다.
+
+## 2026-10-13 모바일 복사 상대 경로 유지 / 1.0.1.27
+
+- 코어 신규10개와 기존 transfer/video_limit/enhancements 총55개(54통과·권한1skip): 다중 연월·상위 경로가 다른 동명 output_·기존 연월 재사용과 다른 파일 보존·skip/rename/overwrite·용량 필터/재시도 경로 보존·전체 경로 대소문자 중복·안전하지 않은 경로 사전 거부·중간 파일/중복 폴더 충돌·중간 취소/연결 해제·빈 폴더·기존 수동 API 호환을 검증했다.
+- 신규 UI5개: 실제 QThread·임시 Target·가상 휴대폰을 사용해 연도/월/날짜/모델/output 전체 전송, 기존 연도 및 별도 파일 보존, 모델 제외/영상 제한, 기기 재탐색 뒤 실패 파일만 재시도, 기준 위치 안내와 변경된 전체 예정 경로 툴팁을 검증했다.
+- 독립 검토에서 폴더 조회 응답을 기다리는 중 취소해도 빈 연도 폴더가 생성되는 경우를 RED로 재현했다. ensure_folder 진입과 조회 반환 직후 취소를 확인하도록 보완했다. 신규5개 GREEN, 독립 전체 모바일132개(131통과·1skip) 통과. root 최종 모바일132개/3.183초(131통과·1skip), `validation_phone_relative_mobile.log` 기록.
+- 취소 보완 전 모듈을 로드한 첫 전체770개 회귀는 신규 취소 테스트1건 실패를 기록했다. 첫 로그는 `validation_phone_relative_full_before_cancel_fix.log`에 보존했다. 보완 후 두 번째 전체770개/281.583초는 기존 영상 병렬 테스트1건 실패·2skip을 기록했으며 `validation_phone_relative_full_before_wait_fix.log`에 보존했다.
+- 기존 병렬 테스트를 독립5회 실행해 모두 통과했다. 영상 완료 저널 저장에5.2초 지연을 주입하면 기존5초 대기가 실패하는 것을 재현했고, 테스트의 동기화 제한만60초의 교착 방지 제한으로 바꾸고 실패 결과 메시지를 보강했다. 수정 후 관련7개/15.280초 통과, 같은 지연 주입도5.496초에 완료 확인·SUCCESS/SUCCESS·0001/0002 보존으로 통과했다. 최초 전체 실패에는 오류 메시지가 없어 원인을 단정하지 않는다. 변환 엔진은 이번 작업에서 변경하지 않았다. 이 보강은 테스트 전용이며 EXE에 영향을 주지 않는다.
+- `.tmp_test/run_phone_relative_suite.py`: 최종 전체770개/207.961초,768통과·Windows 심볼릭 링크 권한2skip·실패0·프로세스 종료0. `validation_phone_relative_full.log` 기록. 테스트 전용 mutex namespace로 사용자 실행 앱과 격리하며 production mutex는 유지한다. 독립 최종 문서 검토에서 정책 누락/모순 없음, `git diff --check` 통과.
+- `.tmp_test/render_phone_relative.py`:가상 휴대폰의 Photos와 기존2024년 폴더, Target의 두 모델 출력 폴더를1204×1032로 렌더했다. 기준 위치 안내·모델 해제·연도부터 시작하는 상대 경로/출력 부분 강조·예정 경로·하단 버튼 접근을 직접 확인했다. `.tmp_test/mobile_copy_relative_path.png`에 기록했다.
+- PyInstaller clean167.871초 빌드 성공: `dist_v1.0.1.27/PhotoOrganizer.exe`(71,333,775bytes), `validation_phone_relative_build.log`. PE FileVersion/ProductVersion1.0.1.27·수정날짜2026-10-13 확인.
+- `.tmp_test/verify_phone_relative_exe.py`:내장11개 기존 기능 모듈과 신규 경로/재시도/UI 코드 확인,512개 동봉 ExifTool 파일/전체SHA256·13.59 실행 및 실제 windowed 사진/영상 메타정보·사진 변환 worker·백업/복원 통과. EXE에서 추출한 실제 경로 코어로 다중 연도·기존 폴더 재사용·별도 파일 보존·용량 필터·재시도·동일 파일 정책을 가상 기기에서 실행했다. `validation_phone_relative_exe.log` 기록.
+- 기존 PC 원본·기존 Target·작업 파일·실제 휴대폰 데이터를 변경하지 않았다. 원격 Git 반영 없음. 실제 Android USB 전송·취소/연결 해제·기존 폴더 합치기는 후속 현장 확인 대상이다.
+
+## 2026-10-13 개별 파일 선택·원본 모델명 수정 / 1.0.1.26
+
+- 신규 선택 코어12개: 모델/파일 필터 교집합, 모델 재선택, 날짜 SEQ, 수동 파일명·충돌, 구작업 로드, 제외 상태 저장, 실행 불변 서명을 검증했다. 같은 폴더 재읽기/재추론은 기존 추론된 영상을 근거로 재사용하지 않고 새 모델은 기본 선택한다.
+- 신규 처리/UI18개(기존 fixture 상속 포함): 논리9/기본 맨 앞 처리 체크, 선택·busy 잠금, 원본 경로 편집, 기존 파일 조회 인덱스와 기존9열 폭/순서/숨김 복원. 신규 보관 폴더 스캔2개: 소유 표식이 확인된 보관 폴더만 engine 및 모바일 output_ 스캔에서 제외한다.
+- 신규 원본 기록14개와 기존 메타정보24개: 합성 JPEG/PNG/MP4/MOV/M4V 실제 ExifTool 기록→앱 원문 모델 재읽기→전체 백업 복원. 사진 픽셀과 영상/음성 패킷·촬영 일시/GPS/방향·Windows 생성/수정 시각 보존, 한글 경로/값, EXIF/XMP 모델 충돌, 조회 이후 동일 크기/시각 외부 변경, 교체 전 원본 변경, 완료 저널 실패와 PREPARED 복구 상태, 백업 변조·링크 경로 거부를 검증했다. HEIC/AVI/MKV/WMV 원본 쓰기는 활성화하지 않는다.
+- 독립 원본 UI11개 및 기존 모델매핑7개/작업18개/파일상세12개 총48개 모두 통과. QThread 실제 원본 기록, 추론/출력 별칭과 원본 태그 구분, 제외·수동 이름·캐시·새 지문 보존, 실패/부분 교체 후 실행 차단, 확인창 지문 전달을 확인했다.
+- 신규 재계획 차단 상태5개: metadata_refresh_required 엄격 타입·구작업 기본값·저장/로드·실행 등록/preflight 차단. 독립 검토에서 재로드 거부를 RED로 확인해 조회용 job reconcile에서 차단 계획을 건너뛰도록 수정했다. 원본 writer 진입 전 최근/활성 작업 파일 모두 차단 상태 저장, 저장 실패 시 writer 미호출, 성공 후 두 checkpoint 모두 새 모델/지문·차단 해제까지 실제 파일로 검증했다. 일반 자동저장 해제도 안전 checkpoint는 수행한다.
+- 첫 전체 실행에서 기존 모델 선택 SimpleNamespace fixture의 새 필드 누락과 이후 Qt 프로세스 종료가 발생했다. fixture를 새 file_selected/selected_models 계약에 맞춰 갱신하고 해당9개 통과 후 faulthandler를 켠 최종 전체 회귀를 다시 수행했다.
+- `.tmp_test/run_original_metadata_suite.py`:전체755개/172.153초,753통과·Windows 심볼릭 링크 권한2skip·실패0·프로세스 종료0. `validation_original_metadata_full.log` 기록. 사용자 실행 앱과의 mutex 경합은 테스트 프로세스 전용 namespace로 격리하며 production mutex는 변경하지 않았다.
+- `.tmp_test/render_original_metadata.py`:Malgun Gothic1204×1032 메인 화면의 처리 체크/제외 사유/모델 필터/상세 버튼 및701×310 원본 모델 편집창을 렌더해 직접 확인했다. 캡처는 `.tmp_test/original_metadata_main.png`, `.tmp_test/original_metadata_dialog.png`다. 실제 Windows 원격 세션의 화면 조작은 후속 현장 확인 대상이다.
+- 공식 Windows x64 ExifTool13.59 ZIP SHA256 고정, 원본 라이선스와510개 runtime 파일 hash manifest를 동봉했다. 오프라인 검증·손상/누락 거부 확인 후 PyInstaller clean52.547초 빌드 성공: `dist_v1.0.1.26/PhotoOrganizer.exe`(71,331,730bytes), `validation_original_metadata_build.log` 기록.
+- `.tmp_test/verify_original_metadata_exe.py`:최종 EXE 내장11개 기능 모듈/버전·수정날짜,512개 ExifTool runtime/manifest/설명 파일 추출과 전체 SHA256·13.59 실행 확인. EXE에서 추출한 실제 기록 서비스와 내장 도구로 합성 JPEG/MP4 모델 태그 기록, 전체 백업 확인·복원 통과. 실제 windowed EXE 사진/영상 메타정보와 사진 변환 worker 왕복 통과. `validation_original_metadata_exe.log` 기록. PE FileVersion/ProductVersion1.0.1.26 및 수정날짜2026-10-13 확인.
+- 사용자 원본·기존 Target·기존 저장 작업은 테스트에서 변경하지 않았다. 원본 변경 검증은 합성 임시 파일만 사용했다. Git origin 반영 없음. 실제 대용량/제조사별 원본과 HEIC 쓰기는 대표 샘플 후속 검증 대상이다.
+
+## 2026-10-12 개별 제외·원본 메타정보 수정 설계 조사
+
+- `engine.set_selected_models`는 모델 단위로 included를 다시 지정하므로 개별 선택 상태를 별도로 보존해야 한다. 기존 실행 ledger와 resume 검증은 included 항목을 기준으로 한다. 실행 시작 후 계획 서명은 변경할 수 없다.
+- MetadataExtractor는 원본 모델명 추출을 지원하지만 원본 기록 API는 없으며 PATH 확인 결과 ffmpeg/ffprobe만 발견되고 ExifTool은 발견되지 않았다. 공식 지원 형식표·QuickTime 모델 태그 자료를 확인했다.
+- 당시 설계안과 관련 문서를 작성한 단계였으며 원본 수정 코드·신규 외부 도구 도입·새 배포 빌드는 수행하지 않았다. 사용자 승인 후 구현/검증 결과는 위2026-10-13 항목에 기록했다. 사용자 원본·Target·기존 저장 작업을 변경하지 않았다.
+- 독립 설계 검토에서 선택 교집합/SEQ/수동 이름/계획 잠금은 일관됨을 확인했다. 백업·임시본 스캔 재유입과 강제 종료 시 복구 누락을 지적받아 앱 소유 보관 폴더 스캔 제외, 검증된 백업 복사 후 원자 교체, 내용 지문·원본 수정 저널/재시작 복구와 신규 모델 기본 선택을 설계안에 보완했다.
+
+## 2026-10-12 실제 7월 영상 UNKNOWN 원인 조사
+
+- 사용자 화면1.0.1.24의 `20240723_095440.mp4` 원본을 읽기 전용으로 확인했다. ffprobe/MediaInfo 모두 성공, 경고 없음. 촬영 시각은 메타정보 기준2024-07-23 09:56:16이고 지원 모델명 태그는 확인되지 않았다.
+- 같은 Source 폴더 사진450개를 실제 MetadataExtractor로 읽고 앞뒤 후보를 확인했다. 앞쪽은 `20240721_174503.jpg` / `SM-F926N` /144673초 차이, 뒤쪽은 `20240723_192010.jpg` / `Galaxy_Z_Fold6` /33834초 차이다.
+- ±5분·±30분 사진 후보와 시간무제한 앞뒤 사진 판정 모두 미확인으로 재현했다. 앞뒤 모델 키가 서로 달라 기존 충돌 보존 규칙에 따라 UNKNOWN이 된다. 출력 이름 매핑은 추론 후 적용하므로 추론 후보의 원본 모델 판정을 바꾸지 않는다.
+- 독립 검토에서 실제3파일의 엔진30분 추론 UNKNOWN 재현, 관련fallback22개·preview_edits16개 통과. 1.0.1.24 EXE PYZ의 관련4함수 코드/상수/이름이 현재1.0.1.25와 동일함을 확인했다. 새 버전으로 바꾸는 것만으로 이 사례가 해결되지는 않는다.
+- 조사 스크립트 `.tmp_test/diagnose_july_unknown.py`는 원본 메타정보를 읽고 결과만 출력했다. 원본·Target·저장된 작업을 변경하지 않았으며 추론 정책이나 배포 버전을 변경하지 않는다.
+
+## 2026-10-12 모바일 경로 저장·후속 개선 / 1.0.1.25
+
+- 신규 `test_phone_locations.py`5개와 `test_phone_locations_ui.py`4개: 저장·재오픈·다중 위치·fresh ID 재탐색·경로 누락/중복·다른 기기 거절·busy 잠금·삭제·손상 JSON·원자 저장 실패 보존. UI 미구현 TypeError RED 이후 구현했다. 첫 단계 독립8개와 추가 다중 위치/저장 실패 Qt probe 통과.
+- 신규 `test_phone_view_preferences.py`4개: 창/분할/논리 컬럼 폭·시각 순서 roundtrip, 손상/크기 제한·화면 밖 복원·저장 실패 보존을 검증했다.
+- 신규 `test_phone_transfer_enhancements.py`12개(재시도4개 포함): 정책 조회 재사용·시간/횟수, 외부 파일/폴더 충돌·원격 객체 변경 후 재조회·UNVERIFIED 캐시 폐기·단계/지연 응답·callback 오류 보호, 실패/취소만 재시도·원본 변경/누락·불확실 상태 제외. TDD RED/GREEN 확인.
+- 기존 늦은 영상 크기 증가 테스트는 반복 원격 조회에 의존하던 주입을 사진 업로드 직후 상태 변화로 바꾸고 영상 전송 직전 크기 재검증·총량 보존을 계속 확인했다.
+- 신규 `test_phone_improvements_ui.py`10개: 용량 진행률, 취소/늦은 callback 진행률 보존, busy 읽기/체크 잠금, splitter/컬럼 저장, 가상 폰과 실제 파일의 성공/취소→미전송 파일만 재시도·기존 성공 보존·원본 변경 거절·기기 식별자/목적지 변경 차단, 전체 화면 이전 상태 저장, 작은 화면 하단 버튼 접근.
+- 마지막 `.venv/Scripts/python.exe -m unittest discover -s tests -p test_phone*.py`:117개/1.862초,116통과·1skip. 메인 화면17개/2.686초 모두 통과. 실제 Android USB 전송은 수행하지 않았다.
+- 독립 최종117개/1.805초,116통과·1skip 및 별도 Qt/로그 probe 통과. 같은 표시 이름의 다른 연결 기기 재시도, 전체 화면 종료 시 상태 유실,640×600 최소높이658px를 각각 RED로 재현하고 수정했다. 최종 FHD/1204×1032/640×600에서 요청 크기·하단 버튼 접근, 일반/최대화→전체 화면→종료의 normalGeometry와 최대화 상태 보존, 저장 실패 시 JSON 유지와 worker 종료, 실제 AppLogger JSONL의 정책 조회 계측 이벤트를 확인했다.
+- `.tmp_test/run_phone_improvements_suite.py`:전체693개/120.955초,691통과·Windows symbolic-link 권한2skip·실패0. `validation_phone_improvements_full.log` 기록. 최종 표 영역 stretch 조정 후 모바일117개/1.807초,116통과·1skip 재확인.
+- `.tmp_test/render_phone_improvements.py`와 `mobile_copy_improvements.png`: Malgun Gothic 폰트로1204×1032의 저장 위치/경로 등록·불러오기, 세 목록 경계·읽기용 표·경로 색상·하단 버튼 배치를 직접 확인했다.
+- PyInstaller 최종 소스 `--clean` 빌드26.109초 성공: `dist_v1.0.1.25/PhotoOrganizer.exe`, `validation_phone_improvements_build.log` 기록.
+- `.tmp_test/verify_phone_improvements_exe.py`: 경로 저장·표시 설정·재시도·정책 조회 재사용·WPD 단계 코드를 포함한 내장30모듈, 실제 windowed EXE 메타정보/사진 변환 worker 왕복 통과. 검증 스크립트의 closure 변수 검사 누락을 보완한 뒤 최종 검증했다. PE FileVersion/ProductVersion1.0.1.25와 수정날짜2026-10-12 확인.
+- `git diff --check` 통과. 신규 런타임 `phone_locations.json`, `phone_view_preferences.json`의 Git ignore 적용 확인. origin 반영 없음. 실제 Android USB 재연결·취소·연결 해제 및 속도 개선은 실기 측정 전 확인되지 않은 상태다.
+
+## 2026-10-12 모바일 복사 저장 위치 안내·경로 강조 / 1.0.1.24
+
+- 저장 위치 아래 줄바꿈 가능한 안내: 휴대폰에서 output_ 폴더가 들어갈 위치를 선택하면 그 바로 아래에 복사된다는 내용을 표시한다. 연월 비교나 자동 경로 변경 없이 기존 전송 규칙을 유지한다.
+- 날짜/모델 폴더와 결과 파일 경로에 부분 글자색 delegate를 적용한다. output_ 디렉토리부터 뒤쪽 파일명까지 구분하며 disabled 행은 기존 회색으로 유지한다. 원문 경로 및 전송 대상은 변경하지 않는다.
+- 모바일 관련82개/0.942초:81통과·1skip. 메인 화면17개/25.572초 모두 통과. 선택·취소·동영상 용량 제한 및 버전 표시 회귀를 확인했다.
+- 최초 delegate3개/0.147초 모두 통과: 경로 component 경계·슬래시/역슬래시·한글, 일반/선택/disabled/다크 실제 paint와 체크·원문·sizeHint 보존, 가운데 생략된 경로 강조 범위 검증.
+- 마지막 좌측 생략 범위 보완 후 delegate4개/0.228초 모두 통과. 이모지 앞 UTF-16 오프셋과 비활성 렌더의 기본 delegate 대비 픽셀 동일성을 포함한다. 독립 관련25개 및 최종delegate4개 검토 통과. 안내 추가로 최소 크기 힌트526×594(높이+18px);640×600에서 하단 버튼 접근을 확인했다. 실제 Windows 테마 화면은 추가 확인 대상이다.
+- Windows Segoe UI 폰트를 명시한 Qt 렌더 캡처 `.tmp_test/phone_output_colors_font.png`에서 앞쪽 경로 기본색·output_ 폴더부터 파일명까지 파란색·비활성 행 회색을 직접 확인했다.
+- 최초 빌드에는 작성 중의 빈 delegate 코드가 포함되어 내장 모듈 검증이 실패했다. 소스 작성 종료 후 `--clean` 전체 재빌드로 해결했고 `validation_phone_path_hint_build.log`에173.893초 빌드 성공 기록. 최종 EXE의 내장25모듈·좌측 생략 보완·PE FileVersion/ProductVersion1.0.1.24 및 수정날짜2026-10-12를 확인했다.
+- `.tmp_test/verify_phone_path_hint_exe.py`: 실제 windowed EXE 메타정보·사진 변환 worker 왕복 통과. 최초40초 제한을 초과해 검증 스크립트 제한만120초로 늘린 뒤 통과했다. 앱 설정/작업 데이터는 변경하지 않았다. `git diff --check` 통과, origin 반영 없음.
+
+## 2026-10-12 모바일 복사 모델 선택·창 확대 / 1.0.1.23
+
+- 신규 `test_phone_model_selection.py` 6개: 표준/매핑/UNKNOWN/미분류 이름, 전체 선택/해제, 새로고침 및 재등장 모델 선택 보존을 검증했다.
+- 신규 `test_phone_model_filter_ui.py` 6개: 모든 날짜 모델 제외와 실제 worker 전달 목록, 개별 폴더 체크 복원, 전체 해제 시 복사 불가, 새로고침 선택 유지·신규 모델 선택, 실제 작은 출력 파일의 동영상 용량 제한 요약, 최대화/전체 화면/Esc 및 worker 유지 검증. 개별 폴더 새로고침 초기화를 RED로 재현하고 수정했다.
+- `.venv/Scripts/python.exe -m unittest discover -s tests -p test_phone*.py`: 82개/0.965초,81통과·1skip. USB 전송 핵심·취소·기기 실패·로그 실패·동영상 용량 제한·설정 회귀 포함.
+- Qt offscreen 창의 최소 크기 힌트 526×576, 800×800 테스트 화면에서 최대화796×796 확인. 실제 Android USB 전송 및 Windows 제목 표시줄 동작은 후속 사용자 환경 검증으로 남긴다.
+- 독립 검토 관련21개 모두 통과. 640×600 창에서 모델 선택 스크롤 높이70px, 하단 닫기 버튼 하단588px로 접근 가능했고 선택 유지·실제 전송 요청·전송 중 선택 잠금·Esc 복원에 추가 차단 문제 없음을 확인했다.
+- `test_ui_main_window.py`17개/2.335초 모두 통과. 네 자리 버전 표시와 기존 메인 화면 회귀 검증.
+- PyInstaller `dist_v1.0.1.23/PhotoOrganizer.exe` 빌드 성공(26.742초), `validation_phone_models_build.log` 기록. `.tmp_test/verify_phone_models_exe.py`에서 모델 선택·최대화/전체 화면 코드를 포함한 내장24모듈, 실제 windowed EXE의 메타정보·사진 변환 worker 왕복, PE FileVersion/ProductVersion1.0.1.23 및 수정날짜2026-10-12 확인. `git diff --check` 통과. origin 반영 없음.
+
+## 2026-10-12 숫자 파일명 모델명 오인 수정 / 1.0.1.22
+
+- 신규 `test_numeric_filename_model.py`6개: `_02`/`_99`/`_0001`/숫자+SEQ/숫자 구간의 오인을 실패로 재현한 뒤 수정. 사진과 영상의 일시 보존·정상 문자 모델·실제 메타데이터 숫자 모델 보존·주변 사진 추론·후보 부재/충돌 UNKNOWN·공유SEQ 및 안내 근거를 검증했다.
+- `.tmp_test/run_numeric_model_suite.py`: 전체642개/113.623초,640통과·Windows symbolic link 권한2skip·실패0. `validation_numeric_model_full.log` 기록.
+- 독립 검토의 신규/fallback/metadata52개 통과 및 실제 UI fixture 안내 열 표시/원본warnings불변 확인. 숫자-only filename 근거의 다른 영상 전파 차단, 기존 메타데이터/사용자 입력 유지와 SEQ·추론 정책 일치 확인.
+- `.tmp_test/verify_numeric_model_native.py`: 실제 MP4와 모델/촬영 일시 EXIF가 있는 JPEG를 기존 숨김 metadata worker로 읽어 숫자 접미사 제외→Galaxy_Z_Fold6 사진 추론,20240929_103347 일시와0001/0002 공유SEQ 및 안내를 확인했다. 원본 파일은 유지했고 Target 파일을 만들지 않는 미리보기로 검증했다. 사용자 원본 영상의 태그 자체는 확인하지 않았다.
+- PyInstaller `dist_v1.0.1.22/PhotoOrganizer.exe` 빌드 성공(26.556초), `validation_numeric_model_build.log` 기록. `.tmp_test/verify_numeric_model_exe.py`: 내장22모듈/숫자 접미사 패턴·안내 코드, 실제 windowed EXE 메타정보 worker의 숫자 suffix 모델None/일시/안내 근거, 기존 메타정보·사진 파이프 왕복을 검증했다. PE FileVersion/ProductVersion1.0.1.22 및 수정날짜2026-10-12 확인.
+- 새 미리보기에 적용하며 기존 저장/실행 계획은 자동 변경하지 않는다. Git origin 반영 없음.
+
+## 2026-10-12 output 컬럼과 파일 조회 / 1.0.1.21
+
+- `.tmp_test/run_output_column_suite.py`: 관련UI97개/8.135초, 실패·오류0. output 신규8개와 컬럼 배치 신규4개, 기존 원본/대상/파일명 조회·편집·모델 선택·작업 중 조회·작은 화면·헤더 드래그 회귀를 포함한다. `validation_output_column.log` 기록.
+- 실제 Qt 마우스 클릭과 컬럼 이동 후 모바일 출력 사진 조회, 영상 썸네일 경로, 미생성 후 생성·비활성 출력·최신 경로·작업 중 조회 요청을 확인했다. 출력이 없을 때 원본/대상 자동 전환을 하지 않으며 메타정보를 비운다.
+- 구형8열의 사용자 순서/폭/숨김을9열로 복원하고 output을 마지막에 추가한다. 새9열 저장 순서를 유지하고 실행 결과의 새 기본 배치에 output을 마지막으로 두며 기존 사용자 배치는 보존한다.
+- 독립 검토에서 동일97개 회귀 통과 및 처리/SEQ/스케줄러 변경 없음 확인. 첫 관련 회귀의 실제 실행2건 실패는 사용 중인 실행 mutex 충돌로 확인하고 테스트 전용 mutex를 분리한 뒤 성공했다. 사용자 실행 잠금 정책은 변경하지 않았다.
+- PyInstaller `dist_v1.0.1.21/PhotoOrganizer.exe` 빌드 성공(83.632초), `validation_output_column_build.log` 기록. `.tmp_test/verify_output_column_exe.py`로 내장20모듈과 output 선택 논리8번·모바일 출력 종류, 실제 windowed EXE의 메타정보/사진 파이프 왕복 확인. PE FileVersion/ProductVersion1.0.1.21 및 수정날짜2026-10-12 확인.
+- 이번 표시 변경은 관련UI 회귀로 검증했으며 전체 core624개를 반복 실행하지 않았다. 실제 사용자 원격 화면에서의 EXE 수동 조작은 별도 확인 대상이다. origin 반영 없음.
+
+## 2026-10-12 성능 테스트와 혼합 실행 / 1.0.1.20
+
+- 최종 `.tmp_test/run_benchmark_suite.py`:624개/132.121초,622통과·Windows symbolic link 권한2skip·실패0. `validation_benchmark_full.log` 기록. 마지막 UI/실행 확인 변경까지 반영한 소스로 실행했다.
+- 신규 benchmark5개: 동일 작업량/10초 전달/의미 있는 개선만 추천/실패/샘플 부재/취소·원본 보존·개인 임시 폴더 정리. UI7개: 백그라운드·수동 적용·닫기/중단·읽기 전용·시간 증감률·긴 안내 스크롤. 혼합9개: 사진2+영상2의 실제 worker 활동/빈 사진 슬롯 재충전/오류 차단/취소 tail·복구·계획 순서/설정과 서명·ETA 호환.
+- 독립 검토에서 인코더 초기 probe 비용과 GPU→CPU 재시도의 추천 왜곡, 지정 영상+빈 사진의 자동 선택 누락을 확인해 보완했다. 신규/관련 검증 통과 후 전체 회귀를 수행했다.
+- `.tmp_test/verify_benchmark_native.py` 및 `--gpu`: 실제 CPU libx264/NVIDIA NVENC와 숨김 Pillow로 영상1/2개·사진영상 분리/혼합 네 가지 비교가 각각 성공했다.2초640×360 합성 영상과2400×1600 사진을 사용했고 원본 보존과 Target 임시 폴더 제거를 확인했다. 이 샘플에서 영상2개를 추천했고 혼합은10% 개선을 충족하지 않아 추천하지 않았다. 실제 사용자 HDD/다양한 원본의 성능 우위는 별도 확인 대상이다.
+- `.tmp_test/verify_benchmark_cancel.py`:1920×1080/12초 합성 영상의 실제 CPU FFmpeg 인코딩 중 중단하여 OperationInterrupted 반환, 원본 보존, 개인 임시 폴더 정리를 확인했다.
+- `dist_v1.0.1.20/PhotoOrganizer.exe` PyInstaller 빌드 성공(61.365초). `.tmp_test/verify_benchmark_exe.py`로 내장20모듈/성능 테스트와 혼합 실행 코드/실제 windowed EXE의 메타정보·사진 파이프 왕복을 검증했다. FileVersion/ProductVersion1.0.1.20 및 Comments 수정날짜2026-10-12 확인.
+- 작은 창 스크롤은 Qt로 검증했고 사용자 원격 환경의 EXE 수동 조작은 별도 확인 사항이다. 검증 환경은 기존 Python3.13.14이며 Python3.12 별도 실행은 수행하지 않았다. origin 반영 없음.
+
+## 2026-10-12 동영상 동시 변환 / 1.0.1.19
+
+- 설정·기존 작업 복원·busy 조회·성능 설정 관련43개, 실행 확인14개 통과. 예상시간 profile 구분/기존 이력 보존/초기 추정/저장 복원5개 통과. 프로필 검증기가 새9필드 이력을 무효 처리하는 오류를 독립 검토에서 발견하고 지원 값만 허용하도록 수정했다.
+- 영상 동시 처리7개와 사진 병렬 회귀12개 통과. 실제 Barrier 동시 시작/역순 완료/사진·영상 비중첩/취소 및 재개/완료 단계 재처리 방지를 검증한다. 실제 인코더 하드웨어별 성능 측정은 별도 확인 사항이다.
+- 최종 `.tmp_test/run_video_suite.py`:602개/97.187초,600통과·Windows symbolic link 권한2skip. `validation_video_parallel_full.log`에 기록. 테스트용 독립 mutex로 사용자 실행 상태와 분리했다.
+- `.tmp_test/verify_native_video_pair.py`: 전용 임시 폴더의 합성1280×720 영상2개를 실제 CPU FFmpeg로 동시 인코딩했다. 실행 중인 인코더 최대2개/정상 결과2개/계획SEQ 유지 및 ffprobe로640px 출력 확인. 하드웨어별 속도 향상이나 GPU2개 성능은 이 결과로 보장하지 않는다.
+- `dist_v1.0.1.19/PhotoOrganizer.exe` 빌드 성공(38.216초). 내장18모듈, 실제 windowed EXE의 메타정보·사진 출력 파이프 왕복, PE FileVersion/ProductVersion1.0.1.19 및 수정날짜2026-10-12 확인. GUI 설정/표시는 Qt 테스트, 실제 EXE는 내장 코드/내부 파이프로 확인했다.
+- 검증 로그·빌드·샘플은 Git 제외 경로에 보관하고 사용자 미디어는 사용하지 않았다. origin 반영 없음.
+
+## 2026-10-12 컬럼 조절과 즉시 취소 / 1.0.1.18
+
+- 실제 Qt 마우스 폭/순서 드래그와 보조표 저장 복원 검증, 핵심 취소·저널29개 및 새 정책 엔진14개 회귀 통과.
+- 메타정보 작업자 재사용/사진 resize/20초 child 취소 및 native worker pause4개 통과.
+- 첫 전체 검증에서 기존 완료 후 정지 테스트 불일치와 주입한 extractor가 별도 프로세스에서 재현되지 않는 문제를 확인해 새 정책 및 주입 경로를 보완했다. Windows launcher의 하위 프로세스가 Job 할당 전에 생성되는 문제를 재현하고 suspended 시작으로 보완했다.
+- Store Python 실제 인터프리터가 Job 밖에서 활성화되는 경로를 IsProcessInJob과 Job processlist로 확인하고 실제 실행 이미지로 직접 시작하도록 수정했다. 수정 후 실제 실행 중인 손자를 확인하고 pause하여 작업자·손자·응답 스레드 종료를 검증했다.
+- 최종 `.tmp_test/run_immediate_suite.py`:584개/78.508초,582통과·Windows symbolic link 권한2skip. `validation_immediate_full.log` 기록. 빠른 같은 크기 쓰기의 timestamp 테스트 변동은 다른 크기 fixture로 제거했고 GUI 타이머는 실제 paused 상태를 기다리도록 보완했다.
+- `dist_v1.0.1.18/PhotoOrganizer.exe` 빌드 성공(34.317초), 내장12모듈 및 버전/날짜 확인. `.tmp_test/verify_immediate_exe.py`에서 실제 console=False EXE에 요청하여 메타정보 반환과400×200 사진의100×50 출력 성공. 일반 python.exe의 테스트만으로 frozen 파이프를 검증했다고 간주하지 않는다.
+- 실제 사용자 원격 화면에서의 전체 EXE 수동 조작은 별도 확인 사항이다. GUI 마우스 드래그는 Qt 테스트로, EXE는 내부 처리 파이프와 내장 코드로 검증했다. Git origin 반영 없음.
+
 ## 2026-10-12 Git ignore 및 20261012 사전 확인
 
 - 기존 규칙은 README/AGENT/TASKS/docs/tests/scripts를 제외하면서 build_v*/dist_v*/루트 로그·작업·캡처를 허용했다. 실제 HEAD255개/index367개를 검사했다.

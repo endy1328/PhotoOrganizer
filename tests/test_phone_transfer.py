@@ -62,6 +62,12 @@ class PhoneTransferTests(unittest.TestCase):
         (self.output / 'sub' / 'b.mp4').write_bytes(b'video')
         (self.output.parent / 'original.jpg').write_bytes(b'original')
 
+    def output_id(self, phone):
+        parent = 'root'
+        for component in self.output.relative_to(self.target).parts:
+            parent = next(entry.id for entry in phone.children[parent] if entry.name == component)
+        return parent
+
     def test_scan_only_output_preserves_nested_files_excludes_temporary(self):
         (self.output / 'a.tmp.mp4').write_bytes(b'incomplete')
         (self.output / '.photoorganizer_job').mkdir()
@@ -103,7 +109,7 @@ class PhoneTransferTests(unittest.TestCase):
         transfer_outputs(phone, 'root', folders, conflict_policy='rename')
         results = transfer_outputs(phone, 'root', folders, conflict_policy='rename')
         self.assertEqual([r.status for r in results], ['COPIED', 'COPIED'])
-        output_id = phone.children['root'][0].id
+        output_id = self.output_id(phone)
         self.assertEqual({entry.name for entry in phone.children[output_id]},
                          {'a.jpg', 'a_copy0001.jpg', 'a_copy0002.jpg', 'sub'})
         self.assertEqual(len(phone.data), 6)
@@ -119,7 +125,7 @@ class PhoneTransferTests(unittest.TestCase):
         phone = MemoryPhone()
         folders = scan_outputs(self.target)
         transfer_outputs(phone, 'root', folders)
-        output_id = phone.children['root'][0].id
+        output_id = self.output_id(phone)
         phone.children[output_id].append(RemoteEntry('ambiguous', 'A.JPG', False, 9))
         results = transfer_outputs(phone, 'root', folders)
         self.assertEqual(results[0].status, 'FAILED')
@@ -205,7 +211,7 @@ class PhoneTransferTests(unittest.TestCase):
 
     def test_directory_file_collision_fails_without_writing(self):
         phone = MemoryPhone()
-        phone.children['root'].append(RemoteEntry('old', self.output.name, False, 100))
+        phone.children['root'].append(RemoteEntry('old', self.output.relative_to(self.target).parts[0], False, 100))
         results = transfer_outputs(phone, 'root', scan_outputs(self.target))
         self.assertEqual([r.status for r in results], ['FAILED', 'FAILED'])
         self.assertFalse(phone.data)
@@ -228,12 +234,11 @@ class PhoneTransferTests(unittest.TestCase):
         results = transfer_outputs(phone, 'root', scan_outputs(self.target))
         self.assertEqual([r.status for r in results], ['FAILED', 'FAILED'])
 
-    def test_duplicate_output_folder_names_rejected(self):
+    def test_same_output_names_in_distinct_relative_paths_allowed(self):
         second = self.target / 'other' / self.output.name
         second.mkdir(parents=True)
         (second / 'a.jpg').write_bytes(b'other')
-        with self.assertRaises(ValueError):
-            scan_outputs(self.target)
+        self.assertEqual(len(scan_outputs(self.target)), 2)
 
     def test_missing_target_is_clear_error(self):
         with self.assertRaises(ValueError):
@@ -244,7 +249,7 @@ class PhoneTransferTests(unittest.TestCase):
         empty.mkdir()
         phone = MemoryPhone()
         transfer_outputs(phone, 'root', scan_outputs(self.target))
-        output_id = phone.children['root'][0].id
+        output_id = self.output_id(phone)
         self.assertIn('empty', [entry.name for entry in phone.children[output_id]])
 
     def test_failed_upload_does_not_claim_known_completion(self):

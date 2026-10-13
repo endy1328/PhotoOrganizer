@@ -37,6 +37,10 @@ def parse_filename_fallback(filename: str) -> tuple[datetime | None, str | None,
         groups = match.groupdict()
         parsed_at = _parse_date_time(groups.get("date"), groups.get("time"))
         model = groups.get("model")
+        if model and re.fullmatch(r"\d+(?:[_-]\d+)*", model):
+            # Number-only suffixes identify copies/counters, not a camera model.
+            # Apply only to filename fallback; a real metadata model is preserved.
+            return parsed_at, None, "YYYYMMDD_HHMMSS_NUMERIC_SUFFIX"
         return parsed_at, sanitize_model_name(_strip_seq_suffix(model)) if model else None, label
     return None, None, "UNKNOWN"
 

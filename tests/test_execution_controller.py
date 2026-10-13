@@ -156,9 +156,18 @@ class ExecutionControllerTests(unittest.TestCase):
         w._begin_execution_progress()
         w._operation_control.request_pause()
         w._refresh_execution_progress(force=True)
-        self.assertIn('일시정지 요청', w.execution_progress_dock.status_label.text())
+        self.assertIn('일시정지 중', w.execution_progress_dock.status_label.text())
         w._operation_control.resume()
         w._finish_execution_progress()
+
+    def test_worker_cleanup_exception_still_unlocks_ui(self):
+        w = self.window
+        with patch('photo_organizer.isolated_work.close_workers', side_effect=RuntimeError('cleanup failed')):
+            with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
+                w._run_engine_operation(lambda **kwargs: 'done')
+        self.assertFalse(w._operation_active)
+        self.assertFalse(w._busy)
+        self.assertIsNone(w._operation_worker)
 
     def test_paused_wait_is_excluded_from_eta_learning_elapsed(self):
         from photo_organizer.operation_control import OperationControl
@@ -216,6 +225,25 @@ class ExecutionControllerTests(unittest.TestCase):
         w.resize(1204, 1032)
         self.app.processEvents()
         self.assertGreater(w.execution_progress_dock.width(), w.width() * .9)
+
+    def test_video_worker_count_is_visible_in_confirmation(self):
+        from photo_organizer.execution_estimate import estimate_execution
+        from PySide6.QtWidgets import QLabel
+        settings = AppSettings(video_workers=2)
+        estimate = estimate_execution(preview(), settings)
+        dialog = ExecutionConfirmDialog(self.window, estimate, settings)
+        self.addCleanup(dialog.close)
+        self.assertIn('동영상 동시 처리: 2개', dialog.summary_label.text())
+        notes = '\n'.join(label.text() for label in dialog.findChildren(QLabel))
+        self.assertIn('속도가 두 배 빨라진다고 가정하지 않습니다', notes)
+
+    def test_mixed_processing_is_visible_in_confirmation(self):
+        settings = AppSettings(mixed_media_workers=True)
+        from photo_organizer.execution_estimate import estimate_execution
+        estimate = estimate_execution(preview(), settings)
+        dialog = ExecutionConfirmDialog(self.window, estimate, settings)
+        self.addCleanup(dialog.close)
+        self.assertIn('사진·영상 혼합 처리: 사용', dialog.summary_label.text())
 
 
 if __name__ == '__main__':

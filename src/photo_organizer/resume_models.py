@@ -29,23 +29,42 @@ def stage_record(state='PENDING', *, attempt_id='', fingerprint=None, message=''
 def processing_settings(settings):
     """One projection for signatures and journal checks, including old jobs."""
     excluded = set(NON_PROCESSING)
+    if not settings.mixed_media_workers:
+        excluded.add('mixed_media_workers')
+    if settings.video_workers == 1:
+        excluded.add('video_workers')
     if (settings.video_encoder, settings.conversion_speed, settings.photo_workers) == ('cpu', 'balanced', 1):
         excluded.update({'video_encoder', 'conversion_speed', 'photo_workers'})
     return {f.name: getattr(settings, f.name) for f in fields(AppSettings) if f.name not in excluded}
 
 
 def plan_manifest(job):
-    return {'settings': processing_settings(job.settings),
+    manifest = {'settings': processing_settings(job.settings),
             'items': [{name: getattr(item, name, '') for name in PLAN_ITEM_FIELDS} for item in
                       (job.preview_bundle.preview_items if job.preview_bundle else [])],
             'source_fingerprints': job.source_fingerprints}
+    # Preserve byte-for-byte old signatures until an individual choice differs
+    # from the old default. Then freeze both filter layers, even hidden choices.
+    bundle = job.preview_bundle
+    if bundle is not None and any(not item.file_selected for item in bundle.preview_items):
+        manifest['file_selection'] = {
+            'selected_models': sorted(bundle.selected_models) if bundle.selected_models is not None else
+                               sorted({item.model_name for item in bundle.preview_items if item.included}),
+            'files': {item.item_id: item.file_selected for item in bundle.preview_items},
+        }
+    return manifest
 
 
 def canonical_plan(job):
     return json.dumps(plan_manifest(job), ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
-def ensure_plan(job, *, legacy=False, force=False):
+def ensure_plan(job, *, legacy=False, force=False, allow_stale_for_storage=False):
+    # This persisted display state is intentionally outside the immutable media
+    # plan signature. Only snapshot storage may preserve such a blocked plan.
+    if getattr(job, 'metadata_refresh_required', False):
+        if job.execution_started or not allow_stale_for_storage:
+            raise ValueError('원본 메타정보 변경 후 새 미리보기가 필요합니다. 실행할 수 없습니다.')
     if not job.preview_bundle:
         return
     canonical = canonical_plan(job)

@@ -1,9 +1,22 @@
-"""Thread-safe cooperative control, checked only at safe work boundaries."""
-from threading import Condition
+"""Thread-safe attempt cancellation and safe pause/resume checkpoints."""
+from threading import Condition, local
 from time import monotonic
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from collections import deque
+
+_current_file = local()
+
+
+def current_control():
+    return getattr(_current_file, 'control', None)
+
+
+class OperationInterrupted(Exception):
+    """Current unpublished work was canceled, not a media failure."""
+    def __init__(self, reason='pause'):
+        self.reason = reason
+        super().__init__('중단 요청' if reason == 'stop' else '일시정지 요청')
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,8 @@ class OperationControl:
         self._stop_requested = False
         self._stopped = False
         self._active_files = {}
+        self._cancel_generation = 0
+
         self._file_results = deque(maxlen=50)
         self._result_statuses = {}
         self._result_summary = None
@@ -82,9 +97,13 @@ class OperationControl:
         with self._condition:
             previous = self._active_files.get(key)
             self._active_files[key] = (token, FileActivity(key, str(source_path), str(stage)))
+            generation = self._cancel_generation
+        previous_binding = (current_control(), getattr(_current_file, 'generation', None))
+        _current_file.control, _current_file.generation = self, generation
         try:
             yield
         finally:
+            _current_file.control, _current_file.generation = previous_binding
             with self._condition:
                 current = self._active_files.get(key)
                 if current is not None and current[0] is token:
@@ -92,6 +111,14 @@ class OperationControl:
                         del self._active_files[key]
                     else:
                         self._active_files[key] = previous
+
+    def raise_if_interrupted(self):
+        with self._condition:
+            generation = getattr(_current_file, 'generation', self._cancel_generation)
+            if self._stop_requested:
+                raise OperationInterrupted('stop')
+            if self._pause_requested or (current_control() is self and generation != self._cancel_generation):
+                raise OperationInterrupted('pause')
 
     def update_file_activity(self, key, stage):
         with self._condition:
@@ -122,6 +149,8 @@ class OperationControl:
     def request_pause(self):
         with self._condition:
             if not self._stop_requested:
+                if not self._pause_requested:
+                    self._cancel_generation += 1
                 self._pause_requested = True
             self._condition.notify_all()
 
@@ -132,6 +161,8 @@ class OperationControl:
 
     def request_stop(self):
         with self._condition:
+            if not self._stop_requested:
+                self._cancel_generation += 1
             self._stop_requested = True
             self._pause_requested = False
             self._condition.notify_all()

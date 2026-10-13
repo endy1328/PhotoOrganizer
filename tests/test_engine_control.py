@@ -4,7 +4,8 @@ import threading
 import traceback
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -76,7 +77,7 @@ class EngineControlTests(unittest.TestCase):
         self.assertEqual(len(resumed.execution_results), 2)
         self.assertTrue(all(result.status == 'SUCCESS' for result in resumed.execution_results))
 
-    def test_move_stop_during_output_finishes_output_and_removal_of_current_file(self):
+    def test_move_stop_during_output_preserves_committed_main_and_original(self):
         self.job.settings.operation_mode = 'move'
         self.job.settings.mobile_output_enabled = True
         for item in self.items:
@@ -88,34 +89,44 @@ class EngineControlTests(unittest.TestCase):
             return 'SUCCESS'
         with patch.object(self.engine, '_create_mobile_output', side_effect=output):
             result = self.engine.resume(self.job, 'initial', control=self.control)
-        self.assertEqual(result.execution_results[0].status, 'SUCCESS')
-        self.assertFalse(self.sources[0].exists())
-        self.assertTrue(Path(self.items[0].mobile_output_path).exists())
+        self.assertEqual(result.execution_results, [])
+        self.assertTrue(self.sources[0].exists())
+        self.assertTrue(Path(self.items[0].target_path).exists())
+        self.assertFalse(Path(self.items[0].mobile_output_path).exists())
+        stages = self.job.ledger[self.items[0].item_id]
+        self.assertEqual(stages['main']['state'], 'DONE')
+        self.assertEqual(stages['output']['state'], 'PENDING')
+        self.assertEqual(stages['source_remove']['state'], 'PENDING')
+        self.assertEqual(self.control.result_summary().completed_keys, frozenset())
         self.assertTrue(self.sources[1].exists())
         self.assertFalse(Path(self.items[1].target_path).exists())
         self.assertEqual(self.job.ledger[self.items[1].item_id]['main']['state'], 'PENDING')
 
-    def test_stop_during_main_copy_still_finishes_current_mobile_and_move(self):
-        import shutil
+    def test_stop_during_main_copy_preserves_original_and_cancels_all_following_stages(self):
+        from photo_organizer.resume_engine import _copy_interruptible
         self.job.settings.operation_mode = 'move'
         self.job.settings.mobile_output_enabled = True
         for item in self.items:
             item.mobile_output_enabled = True
             item.mobile_output_path = str(self.engine._build_mobile_output_path(Path(item.target_directory), item.new_filename))
-        original_copy = shutil.copyfileobj
         def copy(reader, writer, *args, **kwargs):
-            original_copy(reader, writer, *args, **kwargs)
+            _copy_interruptible(reader, writer)
             self.control.request_stop()
+            self.control.raise_if_interrupted()
         def output(source, target, media_type, request):
             target.write_bytes(source.read_bytes())
             return 'SUCCESS'
-        with patch('photo_organizer.resume_engine.shutil.copyfileobj', side_effect=copy), patch.object(self.engine, '_create_mobile_output', side_effect=output) as convert:
+        with patch('photo_organizer.resume_engine._copy_interruptible', side_effect=copy), patch.object(self.engine, '_create_mobile_output', side_effect=output) as convert:
             result = self.engine.resume(self.job, 'initial', control=self.control)
-        self.assertEqual(len(result.execution_results), 1)
-        self.assertEqual(result.execution_results[0].status, 'SUCCESS')
-        convert.assert_called_once()
-        self.assertFalse(self.sources[0].exists())
-        self.assertTrue(Path(self.items[0].mobile_output_path).exists())
+        self.assertEqual(result.execution_results, [])
+        convert.assert_not_called()
+        self.assertTrue(self.sources[0].exists())
+        self.assertFalse(Path(self.items[0].target_path).exists())
+        self.assertFalse(Path(self.items[0].mobile_output_path).exists())
+        stages = self.job.ledger[self.items[0].item_id]
+        self.assertTrue(all(record['state'] == 'PENDING' for record in stages.values()))
+        self.assertEqual(self.control.result_summary().completed_keys, frozenset())
+        self.assertTrue(self.control.stopped)
         self.assertTrue(self.sources[1].exists())
 
     def test_pause_waits_after_full_file_then_resume_processes_next(self):
@@ -133,6 +144,31 @@ class EngineControlTests(unittest.TestCase):
         finally:
             self.control.request_stop()
             thread.join(30)
+
+    def test_pause_during_copy_retries_current_file_without_counting_canceled_attempt(self):
+        from photo_organizer.resume_engine import _copy_interruptible
+        attempts = []
+        def copy(reader, writer):
+            attempts.append(1)
+            _copy_interruptible(reader, writer)
+            if len(attempts) == 1:
+                self.control.request_pause()
+                self.control.raise_if_interrupted()
+        with patch('photo_organizer.resume_engine._copy_interruptible', side_effect=copy):
+            thread, results, failures = self.worker(lambda: self.engine.resume(self.job, 'initial', control=self.control))
+            try:
+                self.assertTrue(self.control.wait_until_paused(30), self.diagnostics(thread, failures))
+                self.assertFalse(Path(self.items[0].target_path).exists())
+                self.assertEqual(self.job.ledger[self.items[0].item_id]['main']['state'], 'PENDING')
+                self.assertEqual(self.control.result_summary().completed_keys, frozenset())
+                self.control.resume()
+                self.finish(thread, failures)
+                self.assertEqual(len(attempts), 3)
+                self.assertEqual(len(results[0].execution_results), 2)
+                self.assertEqual(self.control.result_summary().succeeded, 2)
+            finally:
+                self.control.request_stop()
+                thread.join(30)
 
     def test_stop_while_paused_unblocks_and_leaves_next_file_pending(self):
         def progress(message, current, total):
@@ -185,7 +221,8 @@ class EngineControlTests(unittest.TestCase):
             result = original(path)
             self.control.request_stop()
             return result
-        with patch.object(self.engine.extractor, 'extract', side_effect=extract) as read:
+        read = Mock(side_effect=extract)
+        with patch.object(self.engine, 'extractor', SimpleNamespace(extract=read)):
             with self.assertRaises(OperationStopped):
                 self.engine.preview(self.request, control=self.control)
         self.assertEqual(read.call_count, 1)
@@ -200,7 +237,7 @@ class EngineControlTests(unittest.TestCase):
             if len(count) == 1:
                 self.control.request_pause()
             return result
-        with patch.object(self.engine.extractor, 'extract', side_effect=extract):
+        with patch.object(self.engine, 'extractor', SimpleNamespace(extract=Mock(side_effect=extract))):
             thread, results, failures = self.worker(lambda: self.engine.preview(self.request, control=self.control))
             try:
                 self.assertTrue(self.control.wait_until_paused(5))
@@ -223,7 +260,8 @@ class EngineControlTests(unittest.TestCase):
 
     def test_scan_stop_is_checked_before_metadata(self):
         self.control.request_stop()
-        with patch.object(self.engine.extractor, 'extract') as read:
+        read = Mock()
+        with patch.object(self.engine, 'extractor', SimpleNamespace(extract=read)):
             with self.assertRaises(OperationStopped):
                 self.engine.preview(self.request, control=self.control)
         read.assert_not_called()
@@ -237,7 +275,7 @@ class EngineControlTests(unittest.TestCase):
             if len(count) == 2:
                 self.control.request_stop()
             return result
-        with patch.object(self.engine.extractor, 'extract', side_effect=extract):
+        with patch.object(self.engine, 'extractor', SimpleNamespace(extract=Mock(side_effect=extract))):
             with self.assertRaises(OperationStopped):
                 self.engine.preview(self.request, control=self.control)
         self.assertEqual(len(count), 2)

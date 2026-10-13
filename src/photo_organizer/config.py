@@ -34,6 +34,8 @@ class ConfigManager:
                 video_encoder=self._choice(app.get('video_encoder'), {'auto', 'cpu', 'gpu'}, 'auto'),
                 conversion_speed=self._choice(app.get('conversion_speed'), {'quality', 'balanced', 'fast'}, 'balanced'),
                 photo_workers=self._photo_workers(app.get('photo_workers')),
+                video_workers=self._video_workers(app.get('video_workers')),
+                mixed_media_workers=self._phone_video_enabled(app.get('mixed_media_workers', False)),
                 source_path=str(app.get("source_path", "")),
                 target_path=str(app.get("target_path", "")),
                 device_name_override=str(app.get("device_name_override", "")),
@@ -67,6 +69,8 @@ class ConfigManager:
                 f"video_encoder = {self._quote(self._choice(settings.video_encoder, {'auto', 'cpu', 'gpu'}, 'auto'))}",
                 f"conversion_speed = {self._quote(self._choice(settings.conversion_speed, {'quality', 'balanced', 'fast'}, 'balanced'))}",
                 f"photo_workers = {self._photo_workers(settings.photo_workers)}",
+                f"video_workers = {self._video_workers(settings.video_workers)}",
+                f"mixed_media_workers = {self._bool_literal(self._phone_video_enabled(settings.mixed_media_workers))}",
                 f"restore_last_job = {self._bool_literal(self._job_preference(settings.restore_last_job))}",
                 f"autosave_job_changes = {self._bool_literal(self._job_preference(settings.autosave_job_changes))}",
                 f'source_path = {self._quote(settings.source_path)}',
@@ -117,6 +121,8 @@ class ConfigManager:
             settings.video_encoder = self._choice(settings.video_encoder, {'auto', 'cpu', 'gpu'}, 'auto')
             settings.conversion_speed = self._choice(settings.conversion_speed, {'quality', 'balanced', 'fast'}, 'balanced')
             settings.photo_workers = self._photo_workers(settings.photo_workers)
+            settings.video_workers = self._video_workers(settings.video_workers)
+            settings.mixed_media_workers = self._phone_video_enabled(settings.mixed_media_workers)
             settings.restore_last_job = self._job_preference(settings.restore_last_job)
             settings.autosave_job_changes = self._job_preference(settings.autosave_job_changes)
             settings.mobile_output_video_quality = normalize_video_quality(settings.mobile_output_video_quality)
@@ -146,6 +152,10 @@ class ConfigManager:
     @staticmethod
     def _photo_workers(value: object) -> int:
         return value if type(value) is int and value in {1, 2, 4} else 2
+
+    @staticmethod
+    def _video_workers(value: object) -> int:
+        return value if type(value) is int and value in {1, 2} else 1
 
     @staticmethod
     def _job_preference(value: object) -> bool:

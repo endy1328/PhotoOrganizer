@@ -64,10 +64,14 @@ class OperationUiTests(unittest.TestCase):
             return 'stopped' if not control.checkpoint() else 'done'
         QTimer.singleShot(5, self.window._toggle_operation_pause)
         def resume():
+            if not self.window._operation_control.paused:
+                QTimer.singleShot(10, resume)
+                return
             observed.append('paused' if self.window._operation_control.paused else 'not paused')
             self.window._toggle_operation_pause()
+            QTimer.singleShot(20, self.window._request_operation_stop)
         QTimer.singleShot(80, resume)
-        QTimer.singleShot(100, self.window._request_operation_stop)
+        QTimer.singleShot(5000, self.window._request_operation_stop)
         result = self.window._run_engine_operation(operation)
         self.assertEqual(result, 'stopped')
         self.assertEqual(observed, ['file done', 'paused', 'resumed'])

@@ -63,7 +63,7 @@ class ParallelPhotoTests(unittest.TestCase):
         self.assertEqual([r.source_path for r in result.execution_results], [str(p) for p in self.sources])
         self.assertEqual([i.new_filename for i in result.preview_items], planned)
 
-    def test_stop_finishes_started_pair_and_leaves_tail_pending(self):
+    def test_stop_cancels_started_outputs_and_leaves_tail_pending(self):
         from photo_organizer.operation_control import OperationControl
         control = OperationControl()
         both = threading.Barrier(2)
@@ -73,8 +73,10 @@ class ParallelPhotoTests(unittest.TestCase):
             return self.convert(source, target, media_type, request)
         with patch.object(self.engine, '_create_mobile_output', side_effect=convert):
             result = self.engine.resume(self.job, 'initial', control=control)
-        self.assertEqual(len(result.execution_results), 2)
-        self.assertTrue(all(r.status == 'SUCCESS' for r in result.execution_results))
+        self.assertEqual(len(result.execution_results), 0)
+        self.assertTrue(all(self.job.ledger[item.item_id]['output']['state'] == 'PENDING'
+                            for item in self.items))
+        self.assertTrue(all(not Path(item.mobile_output_path).exists() for item in self.items))
         self.assertTrue(control.stopped)
         self.assertTrue(all(self.job.ledger[i.item_id]['main']['state'] == 'PENDING' for i in self.items[2:]))
 
@@ -145,8 +147,10 @@ class ParallelPhotoTests(unittest.TestCase):
         from photo_organizer.operation_control import OperationControl
         control = OperationControl()
         results, failures = [], []
+        pause_once = []
         def convert(source, target, media_type, request):
-            if source.name == self.items[0].new_filename:
+            if source.name == self.items[0].new_filename and not pause_once:
+                pause_once.append(True)
                 control.request_pause()
             return self.convert(source, target, media_type, request)
         def run():

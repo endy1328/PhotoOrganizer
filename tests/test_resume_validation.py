@@ -98,7 +98,9 @@ class ResumeValidationTests(unittest.TestCase):
         self.assertEqual(self.actions()['main'].action, 'BLOCK')
 
     def test_existing_destination_and_source_change_block(self):
-        Path(self.item.source_path).write_bytes(b'changed source')
+        # Different size makes the change deterministic even if Windows reports
+        # the same write timestamp for two rapid writes.
+        Path(self.item.source_path).write_bytes(b'changed source bytes')
         self.assertFalse(self.actions()['main'].allowed)
         finish_main(self.job, self.item)
         self.job.ledger[self.item.item_id]['main'] = stage_record('PENDING')

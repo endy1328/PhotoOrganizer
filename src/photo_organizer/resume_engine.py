@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from contextlib import contextmanager, nullcontext
 from threading import Event, RLock
 from dataclasses import fields
@@ -19,6 +19,58 @@ from .job_validation import capture_file_states, _has_link_component, _unchanged
 from .models import OrganizeRequest
 from .resume_models import ensure_plan, initial_ledger, bundle_from_ledger
 from .resume_validation import build_resume_plan
+from .operation_control import OperationInterrupted, current_control
+
+
+def _interrupt_check():
+    control = current_control()
+    if control is not None:
+        control.raise_if_interrupted()
+
+
+def _mixed_completions(pool, remaining, submit, limits, halt_new, control, batch):
+    """Refill independent media slots, stopping submissions before draining errors/cancellation."""
+    running = {}
+    queues = {kind: deque() for kind in limits}
+    for position, item in enumerate(remaining):
+        queues.setdefault(item.media_type, deque()).append((position, item))
+    remaining.clear()
+    while any(queues.values()) or running:
+        interrupted = control is not None and (control.pause_requested or control.stop_requested)
+        if not halt_new.is_set() and not interrupted:
+            counts = {kind: sum(item.media_type == kind for item in running.values()) for kind in queues}
+            while True:
+                available = [queue[0] for kind, queue in queues.items()
+                             if queue and counts[kind] < limits.get(kind, 1)]
+                if not available:
+                    break
+                _, item = min(available, key=lambda candidate: candidate[0])
+                queues[item.media_type].popleft()
+                running[submit(item)] = item
+                counts[item.media_type] += 1
+                batch.append(item)
+        if not running:
+            break
+        done, _ = wait(running, return_when=FIRST_COMPLETED)
+        # Simultaneously ready completions retain submission order.
+        for future in tuple(running):
+            if future in done:
+                yield future, running.pop(future)
+    remaining.extend(item for _, item in sorted((entry for queue in queues.values() for entry in queue),
+                                                key=lambda entry: entry[0]))
+
+
+def _copy_interruptible(reader, writer):
+    if current_control() is None:
+        return shutil.copyfileobj(reader, writer)
+    while True:
+        _interrupt_check()
+        chunk = reader.read(1024 * 1024)
+        if not chunk:
+            break
+        _interrupt_check()
+        writer.write(chunk)
+    _interrupt_check()
 
 
 class JournalCommitError(RuntimeError):
@@ -41,6 +93,16 @@ class _JournalCoordinator:
             except Exception as exc:
                 self.failure = self.failure or exc
                 raise
+
+    def cancel_pending(self, job, item_id, stage, attempt):
+        with self.lock:
+            if self.failure is not None:
+                raise JournalCommitError('저널 오류 이후 취소 기록을 저장할 수 없습니다.')
+            try:
+                self.journal.cancel_pending(job, item_id, stage, attempt)
+            except Exception as exc:
+                self.failure = self.failure or exc
+                raise JournalCommitError('취소 기록을 저장하지 못했습니다.') from exc
 
     @contextmanager
     def publication(self):
@@ -131,6 +193,7 @@ def _run_stage(engine, journal, job, item, stage, request, mode):
     publish_started = False
     changed = False
     existing = _fingerprint(target)
+    _interrupt_check()
     overwrite = mode == 'initial' and not item.filename_edited and item.write_mode == 'OVERWRITE'
     _save(journal, job, item, stage, _record('IN_PROGRESS', attempt, temporary=str(temporary or '')))
     try:
@@ -142,6 +205,7 @@ def _run_stage(engine, journal, job, item, stage, request, mode):
             if job.ledger[item.item_id]['output']['state'] == 'DONE':
                 _assert_baseline(Path(item.mobile_output_path), {item.mobile_output_path: job.ledger[item.item_id]['output']['fingerprint']})
             with journal.publication():
+                _interrupt_check()
                 # Another worker may have held the gate while an external writer
                 # changed these files. Recheck after waiting, immediately before unlink.
                 _assert_baseline(source, job.source_fingerprints)
@@ -161,7 +225,7 @@ def _run_stage(engine, journal, job, item, stage, request, mode):
             _assert_baseline(source, job.source_fingerprints)
             with source.open('rb') as reader, temporary.open('xb') as writer:
                 temporary_created = True
-                shutil.copyfileobj(reader, writer)
+                _copy_interruptible(reader, writer)
                 writer.flush()
                 os.fsync(writer.fileno())
             shutil.copystat(source, temporary)
@@ -208,6 +272,7 @@ def _run_stage(engine, journal, job, item, stage, request, mode):
             raise FileExistsError('최종 대상 파일이 이미 존재합니다.')
         # A second durable intent marks the exact non-atomic publication boundary.
         with journal.publication():
+            _interrupt_check()
             _save(journal, job, item, stage, _record('IN_PROGRESS', attempt, _fingerprint(temporary),
                                                    message='최종 파일 게시 시작', temporary=str(temporary)))
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +291,20 @@ def _run_stage(engine, journal, job, item, stage, request, mode):
             message = _with_encoder_report('', item, stage, converter_called)
             _save(journal, job, item, stage, _record('DONE', attempt, _fingerprint(target), message), changed=True)
         return True
+    except OperationInterrupted:
+        if publish_started:
+            raise JournalCommitError('게시 이후 취소 예외는 안전하게 되돌릴 수 없습니다.')
+        try:
+            _cleanup_owned(temporary, temporary_created)
+            if temporary_created and temporary is not None:
+                for path in (temporary, temporary.with_name(temporary.stem + '.tmp' + temporary.suffix)):
+                    if path.exists() or path.is_symlink():
+                        raise OSError('취소 후 임시 파일 제거를 확인하지 못했습니다: ' + str(path))
+        except OSError as exc:
+            _save(journal, job, item, stage, _record('UNCERTAIN', attempt, message='취소 후 임시 파일 정리 실패: ' + str(exc), temporary=str(temporary or '')))
+            raise JournalCommitError('취소 후 임시 파일 정리를 확인하지 못했습니다.') from exc
+        journal.cancel_pending(job, item.item_id, stage, attempt)
+        raise
     except JournalCommitError:
         if temporary_created and not publish_started:
             try:
@@ -252,27 +331,31 @@ def _run_item(engine, journal, job, item, request, mode, control, halt_new):
             return False, False
         if journal.failure is not None:
             raise JournalCommitError('저널 오류 이후 새 파일 처리를 중단합니다.')
-    with (control.file_activity(item.item_id, item.source_path, 'copy') if control is not None else nullcontext()):
-        for stage in ('main', 'output', 'source_remove'):
-            with journal.lock:
-                current_mode = mode if job.ledger[item.item_id][stage]['state'] == 'FAILED' else ('initial' if mode == 'initial' else 'continue')
-                actions = build_resume_plan(job, current_mode, items=[item])
-                action = next((a for a in actions if a.item_id == item.item_id and a.stage == stage), None)
-                if action is None or not action.allowed or action.action != 'RUN':
-                    if (mode == 'initial' and action is not None and action.action == 'BLOCK'
-                            and job.ledger[item.item_id][stage]['state'] == 'PENDING'):
-                        _save(journal, job, item, stage, _record('FAILED', str(uuid4()), message=action.reason))
-                        if stage == 'output':
-                            halt_new.set()
-                        return True, stage == 'output'
-                    continue
-            if control is not None:
-                control.update_file_activity(item.item_id, {'main': 'copy', 'output': 'output', 'source_remove': 'source_remove'}[stage])
-            if not _run_stage(engine, journal, job, item, stage, request, mode):
-                if stage == 'output':
-                    halt_new.set()
-                return True, stage == 'output'
-        return True, False
+    try:
+        with (control.file_activity(item.item_id, item.source_path, 'copy') if control is not None else nullcontext()):
+            for stage in ('main', 'output', 'source_remove'):
+                with journal.lock:
+                    current_mode = mode if job.ledger[item.item_id][stage]['state'] == 'FAILED' else ('initial' if mode == 'initial' else 'continue')
+                    actions = build_resume_plan(job, current_mode, items=[item])
+                    action = next((a for a in actions if a.item_id == item.item_id and a.stage == stage), None)
+                    if action is None or not action.allowed or action.action != 'RUN':
+                        if (mode == 'initial' and action is not None and action.action == 'BLOCK'
+                                and job.ledger[item.item_id][stage]['state'] == 'PENDING'):
+                            _save(journal, job, item, stage, _record('FAILED', str(uuid4()), message=action.reason))
+                            if stage == 'output':
+                                halt_new.set()
+                            return True, stage == 'output'
+                        continue
+                if control is not None:
+                    control.update_file_activity(item.item_id, {'main': 'copy', 'output': 'output', 'source_remove': 'source_remove'}[stage])
+                if not _run_stage(engine, journal, job, item, stage, request, mode):
+                    if stage == 'output':
+                        halt_new.set()
+                    return True, stage == 'output'
+            return True, False
+
+    except OperationInterrupted:
+        return False, False
 
 
 def _assert_unique_destinations(items):
@@ -288,6 +371,15 @@ def _assert_unique_destinations(items):
 
 
 def execute_job(engine, job, mode='initial', progress_callback=None, control=None):
+    try:
+        return _execute_job(engine, job, mode, progress_callback, control)
+    finally:
+        if control is not None:
+            from .isolated_work import close_workers
+            close_workers(control)
+
+
+def _execute_job(engine, job, mode='initial', progress_callback=None, control=None):
     if mode not in {'initial', 'continue', 'retry'}:
         raise ValueError('지원하지 않는 복구 모드입니다.')
     with ExecutionLock():
@@ -318,20 +410,35 @@ def execute_job(engine, job, mode='initial', progress_callback=None, control=Non
         workers = getattr(request, 'photo_workers', 1)
         if workers not in {1, 2, 4}:
             raise ValueError('사진 동시 처리 수는 1, 2, 4 중 하나여야 합니다.')
+        video_workers = getattr(request, 'video_workers', 1)
+        if type(video_workers) is not int or video_workers not in {1, 2}:
+            raise ValueError('영상 동시 처리 수는 1, 2 중 하나여야 합니다.')
+        mixed = getattr(request, 'mixed_media_workers', False)
+        if type(mixed) is not bool:
+            raise ValueError('사진·영상 혼합 처리 설정은 참/거짓이어야 합니다.')
         remaining, completed = deque(items), 0
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='PhotoOrganizerPhoto') as pool:
+        order = {item.item_id: i for i, item in enumerate(items)}
+        pool_size = workers + video_workers if mixed else max(workers, video_workers)
+        with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix='PhotoOrganizerMedia') as pool:
             while remaining:
                 if control is not None and not control.checkpoint():
                     break
-                batch = [remaining.popleft()]
-                if batch[0].media_type == 'photo':
-                    while remaining and len(batch) < workers and remaining[0].media_type == 'photo':
+                batch = [] if mixed else [remaining.popleft()]
+                if not mixed:
+                    media_type = batch[0].media_type
+                    batch_limit = workers if media_type == 'photo' else video_workers
+                    while remaining and len(batch) < batch_limit and remaining[0].media_type == media_type:
                         batch.append(remaining.popleft())
                 halt_new = Event()
                 skipped, output_failed, fatal = [], False, None
-                futures = {pool.submit(_run_item, engine, journal, job, item, request, mode, control, halt_new): item for item in batch}
-                for future in as_completed(futures):
-                    item = futures[future]
+                def submit(item):
+                    return pool.submit(_run_item, engine, journal, job, item, request, mode, control, halt_new)
+                if mixed:
+                    completions = _mixed_completions(pool, remaining, submit, {'photo': workers, 'video': video_workers}, halt_new, control, batch)
+                else:
+                    futures = {submit(item): item for item in batch}
+                    completions = ((future, futures[future]) for future in as_completed(futures))
+                for future, item in completions:
                     try:
                         started, failed = future.result()
                     except BaseException as exc:
@@ -345,6 +452,8 @@ def execute_job(engine, job, mode='initial', progress_callback=None, control=Non
                     else:
                         completed += 1
                         output_failed = output_failed or failed
+                        if failed:
+                            halt_new.set()
                         if control is not None:
                             records = tuple(job.ledger[item.item_id].values())
                             states = {record['state'] for record in records}
@@ -354,7 +463,7 @@ def execute_job(engine, job, mode='initial', progress_callback=None, control=Non
                             message = '; '.join(record.get('message', '') for record in records
                                                 if record.get('message') and record['state'] not in {'DONE', 'NOT_APPLICABLE'})
                             control.report_file_result(item.item_id, item.source_path, status, message)
-                        # Progress is emitted only by the coordinator, never a photo worker.
+                        # Progress is emitted only by the coordinator, never a media worker.
                         engine._report_progress(progress_callback, '복구 단계 실행 중', completed, len(items))
                 if fatal is not None:
                     raise fatal
@@ -363,6 +472,8 @@ def execute_job(engine, job, mode='initial', progress_callback=None, control=Non
                 for item in reversed(batch):
                     if item.item_id in skipped_ids:
                         remaining.appendleft(item)
+                if mixed and skipped:
+                    remaining = deque(sorted(remaining, key=lambda item: order[item.item_id]))
                 if output_failed:
                     break
         result = bundle_from_ledger(job)

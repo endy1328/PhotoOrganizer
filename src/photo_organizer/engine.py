@@ -57,6 +57,16 @@ class OrganizerEngine:
         self.logger = AppLogger(self.base_dir)
 
     def preview(
+        self, request: OrganizeRequest, progress_callback=None, control=None,
+    ) -> PreviewBundle:
+        try:
+            return self._preview(request, progress_callback, control)
+        finally:
+            if control is not None:
+                from .isolated_work import close_workers
+                close_workers(control)
+
+    def _preview(
         self,
         request: OrganizeRequest,
         progress_callback: Callable[[str, int, int], None] | None = None,
@@ -71,17 +81,31 @@ class OrganizerEngine:
         self._report_progress(progress_callback, "메타데이터 읽는 중", 0, total_items)
         media_items: list[MediaItem] = []
         for index, path in enumerate(items, start=1):
-            self._preview_checkpoint(control)
-            with (control.file_activity(str(path), path, 'metadata') if control is not None else nullcontext()):
-                media_items.append(self.extractor.extract(path))
+            from .operation_control import OperationInterrupted
+            while True:
+                self._preview_checkpoint(control)
+                try:
+                    with (control.file_activity(str(path), path, 'metadata') if control is not None else nullcontext()):
+                        if control is not None and self._native_extractor():
+                            from .isolated_work import isolated_call
+                            item = isolated_call('metadata', (path,))
+                        else:
+                            item = self.extractor.extract(path)
+                        if control is not None:
+                            control.raise_if_interrupted()
+                        media_items.append(item)
+                    break
+                except OperationInterrupted:
+                    self._preview_checkpoint(control)
             self._report_progress(progress_callback, "메타데이터 읽는 중", index, total_items)
         self._preview_checkpoint(control)
         self._report_progress(progress_callback, "영상 모델명 정리 중", 0, total_items)
-        self._infer_video_models(media_items, request.video_model_window_minutes)
+        self._infer_video_models(media_items, request.video_model_window_minutes, **({'control': control} if control else {}))
         self._apply_device_name_override(media_items, request.device_name_override)
         self._normalize_model_names(media_items)
         self._report_progress(progress_callback, "미리보기 생성 중", 0, total_items)
-        preview_items, error_items, log_events = self._build_preview(media_items, request.target_path, request)
+        preview_items, error_items, log_events = self._build_preview(media_items, request.target_path, request,
+                                                                    **({'control': control} if control else {}))
         self._preview_checkpoint(control)
         self._report_progress(progress_callback, "미리보기 완료", total_items, total_items)
         return PreviewBundle(preview_items=preview_items, error_items=error_items, log_events=log_events,
@@ -262,6 +286,10 @@ class OrganizerEngine:
             from .operation_control import OperationStopped
             raise OperationStopped("미리보기를 중단했습니다. 이전 작업 결과를 유지합니다.")
 
+    def _native_extractor(self):
+        return (type(self.extractor) is MetadataExtractor and
+                getattr(self.extractor.extract, '__func__', None) is MetadataExtractor.extract)
+
     def set_selected_models(self, bundle: PreviewBundle, selected_models: set[str]) -> None:
         """Re-plan selected rows without rescanning or changing inferred metadata."""
         file_conflict = "날짜 기준 고정 SEQ가 이미 사용 중인 파일과 충돌합니다."
@@ -270,7 +298,7 @@ class OrganizerEngine:
         sequence_counters: dict[Path, int] = {}
         candidates = []
         for original in bundle.preview_items:
-            item = replace(original, included=original.model_name in selected_models,
+            item = replace(original, included=original.file_selected and original.model_name in selected_models,
                            warnings=[w for w in original.warnings if w not in {file_conflict, selection_conflict}])
             if item.included:
                 directory = Path(item.target_directory)
@@ -314,7 +342,85 @@ class OrganizerEngine:
                         item.warnings.append(selection_conflict)
         bundle.preview_items = candidates
         bundle.selection_applied = True
+        bundle.selected_models = sorted(selected_models)
         bundle.log_events.append(LogEvent("INFO", f"처리할 모델 선택: {', '.join(sorted(selected_models)) or '없음'}"))
+
+    @staticmethod
+    def _selected_models(bundle: PreviewBundle) -> set[str]:
+        if bundle.selected_models is not None:
+            return set(bundle.selected_models)
+        return {item.model_name for item in bundle.preview_items if item.included}
+
+    def set_selected_files(self, bundle: PreviewBundle, item_ids: Iterable[str], selected: bool) -> None:
+        """Change individual choices without changing independent model choices."""
+        if type(selected) is not bool:
+            raise ValueError('파일 선택 여부는 참/거짓이어야 합니다.')
+        ids = set(item_ids)
+        if ids - {item.item_id for item in bundle.preview_items}:
+            raise ValueError('미리보기 항목을 찾을 수 없습니다.')
+        models = self._selected_models(bundle)
+        candidate = replace(bundle, preview_items=[replace(item, file_selected=selected if item.item_id in ids else item.file_selected)
+                                                   for item in bundle.preview_items], log_events=list(bundle.log_events))
+        self.set_selected_models(candidate, models)
+        candidate.log_events.append(LogEvent('INFO', f'개별 파일 {"포함" if selected else "제외"}: {len(ids)}건'))
+        bundle.preview_items = candidate.preview_items
+        bundle.selected_models = candidate.selected_models
+        bundle.selection_applied = True
+        bundle.log_events = candidate.log_events
+
+    def refresh_preview_after_metadata(self, bundle: PreviewBundle, request: OrganizeRequest,
+                                       source_path: str | Path) -> PreviewBundle:
+        """Read the edited source directory afresh; commit only a complete re-plan.
+
+        Caller must prohibit editing a job whose execution has started and refresh
+        its source fingerprints after this method succeeds.
+        """
+        source = Path(source_path)
+        originals = {item.source_path: item for item in bundle.preview_items}
+        if str(source) not in originals:
+            raise ValueError('미리보기 항목을 찾을 수 없습니다.')
+        old_models = {item.model_name for item in bundle.preview_items}
+        selected = self._selected_models(bundle)
+        try:
+            media = []
+            available = {item.source_path for item in bundle.media_items}
+            for original in bundle.media_items:
+                item = (self.extractor.extract(original.source_path)
+                        if original.source_path.parent == source.parent else original)
+                media.append(replace(item, warnings=list(item.warnings), metadata=dict(item.metadata)))
+            # Older saved snapshots may omit media records. Re-read their known
+            # rows/errors rather than inventing metadata from formatted filenames.
+            for path in dict.fromkeys([Path(item.source_path) for item in bundle.preview_items] +
+                                      [Path(item.source_path) for item in bundle.error_items]):
+                if path not in available:
+                    item = self.extractor.extract(path)
+                    media.append(replace(item, warnings=list(item.warnings), metadata=dict(item.metadata)))
+            if not any(item.source_path == source and item.ready for item in media):
+                raise ValueError('수정한 원본의 메타정보를 다시 읽지 못했습니다.')
+            self._infer_video_models(media, request.video_model_window_minutes)
+            self._apply_device_name_override(media, request.device_name_override)
+            self._normalize_model_names(media)
+            rows, errors, events = self._build_preview(media, request.target_path, request)
+            candidate = PreviewBundle(preview_items=rows, error_items=errors,
+                                      log_events=list(bundle.log_events) + events, media_items=media,
+                                      model_name_mappings=validate_model_mappings(request.model_name_mappings),
+                                      model_mapping_scope=normalize_model_mapping_scope(request.model_mapping_scope))
+            for item in rows:
+                previous = originals.get(item.source_path)
+                if previous is not None:
+                    item.file_selected = previous.file_selected
+            new_models = {item.model_name for item in rows} - old_models
+            candidate.selected_models = sorted(selected | new_models)
+            names = {item.source_path: item.new_filename for item in bundle.preview_items if item.filename_edited}
+            self.restore_manual_filenames(candidate, names)
+            self.set_selected_models(candidate, set(candidate.selected_models))
+        except Exception as exc:
+            raise ValueError(f'원본 수정 후 미리보기를 다시 계획하지 못했습니다. 새 미리보기를 실행해주세요: {exc}') from exc
+        bundle.preview_items, bundle.error_items = candidate.preview_items, candidate.error_items
+        bundle.log_events, bundle.media_items = candidate.log_events, candidate.media_items
+        bundle.model_name_mappings, bundle.model_mapping_scope = candidate.model_name_mappings, candidate.model_mapping_scope
+        bundle.selected_models, bundle.selection_applied = candidate.selected_models, True
+        return bundle
 
     def restore_manual_filenames(self, bundle: PreviewBundle, names: dict[str, str]) -> int:
         """Restore edits into a new mapped plan; expose all resulting collisions."""
@@ -337,10 +443,11 @@ class OrganizerEngine:
             candidate.log_events.append(LogEvent("INFO", "매핑 변경 후 수동 파일명 유지", item.source_path, item.target_path))
             count += 1
         if count:
-            self.set_selected_models(candidate, {i.model_name for i in candidate.preview_items if i.included})
+            self.set_selected_models(candidate, self._selected_models(candidate))
             bundle.preview_items = candidate.preview_items
             bundle.log_events = candidate.log_events
             bundle.selection_applied = candidate.selection_applied
+            bundle.selected_models = candidate.selected_models
         return count
 
     def edit_preview_filename(self, bundle: PreviewBundle, item_id: str, filename: str) -> PreviewItem:
@@ -348,7 +455,7 @@ class OrganizerEngine:
         if item is None:
             raise ValueError("미리보기 항목을 찾을 수 없습니다.")
         if not item.included:
-            raise ValueError("제외한 모델의 파일명은 수정할 수 없습니다. 먼저 모델을 선택해주세요.")
+            raise ValueError("제외한 파일의 파일명은 수정할 수 없습니다. 먼저 모델과 파일을 처리 대상으로 선택해주세요.")
         self._validate_manual_filename(filename, Path(item.source_path).suffix)
         target = Path(item.target_directory) / filename
         mobile = self._build_mobile_output_path(Path(item.target_directory), filename) if item.mobile_output_enabled else None
@@ -372,7 +479,7 @@ class OrganizerEngine:
         item.metadata_entries.append(("사용자 지정 파일명", filename))
         bundle.log_events.append(LogEvent("INFO", "사용자 파일명 수정", item.source_path, item.target_path))
         if bundle.selection_applied:
-            self.set_selected_models(bundle, {row.model_name for row in bundle.preview_items if row.included})
+            self.set_selected_models(bundle, self._selected_models(bundle))
             return next(row for row in bundle.preview_items if row.item_id == item_id)
         return item
 
@@ -464,30 +571,38 @@ class OrganizerEngine:
         return self._build_metadata_entries(item)
 
     def _scan_media_files(self, source_path: Path, target_path: Path | None = None, control=None) -> list[Path]:
+        from .metadata_writer import is_metadata_storage
         source_resolved = source_path.resolve()
         target_resolved = target_path.resolve() if target_path else None
         paths: list[Path] = []
-        for path in source_path.rglob("*"):
+        if is_metadata_storage(source_path):
+            return paths
+        for directory, names, filenames in os.walk(source_path):
             self._preview_checkpoint(control)
-            if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-                continue
-            try:
-                resolved = path.resolve()
-                if target_resolved and (resolved == target_resolved or target_resolved in resolved.parents):
+            names[:] = [name for name in names if not is_metadata_storage(Path(directory) / name)]
+            for filename in filenames:
+                path = Path(directory) / filename
+                self._preview_checkpoint(control)
+                if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                     continue
-                if resolved == source_resolved:
-                    continue
-            except Exception:
-                pass
-            paths.append(path)
+                try:
+                    resolved = path.resolve()
+                    if target_resolved and (resolved == target_resolved or target_resolved in resolved.parents):
+                        continue
+                    if resolved == source_resolved:
+                        continue
+                except Exception:
+                    pass
+                paths.append(path)
         return sorted(paths)
 
-    def _infer_video_models(self, media_items: list[MediaItem], window_minutes: int = 5) -> None:
+    def _infer_video_models(self, media_items: list[MediaItem], window_minutes: int = 5, control=None) -> None:
         photos_by_dir: dict[Path, list[MediaItem]] = {}
         for item in media_items:
             if item.captured_at and canonical_model_key(item.model_name) and "추론" not in item.model_source:
                 photos_by_dir.setdefault(item.source_path.parent, []).append(item)
         for item in media_items:
+            self._preview_checkpoint(control)
             if item.media_type != "video" or canonical_model_key(item.model_name):
                 continue
             candidates = photos_by_dir.get(item.source_path.parent, [])
@@ -560,6 +675,7 @@ class OrganizerEngine:
         media_items: list[MediaItem],
         target_root: Path,
         request: OrganizeRequest,
+        control=None,
     ) -> tuple[list[PreviewItem], list[ErrorItem], list[LogEvent]]:
         mappings = validate_model_mappings(request.model_name_mappings)
         scope = normalize_model_mapping_scope(request.model_mapping_scope)
@@ -576,6 +692,7 @@ class OrganizerEngine:
             ),
         )
         for item in ordered_items:
+            self._preview_checkpoint(control)
             if not item.captured_at:
                 message = "촬영 일시를 메타데이터와 파일명에서 모두 찾지 못했습니다."
                 error_items.append(ErrorItem(source_path=str(item.source_path), message=message, media_type=item.media_type))
@@ -591,7 +708,8 @@ class OrganizerEngine:
             seq = self._next_sequence_for_directory(sequence_directory, sequence_counters)
             self._remember_next_sequence(sequence_directory, seq + 1, sequence_counters)
             target_filename, write_mode = self._build_target_filename(item, target_dir, seq,
-                                                                      output_model_name=output_model_name)
+                                                                      output_model_name=output_model_name,
+                                                                      **({'control': control} if control else {}))
             target_path = target_dir / target_filename
             mobile_output_path = ""
             if request.mobile_output_enabled:
@@ -639,6 +757,7 @@ class OrganizerEngine:
         seq: int,
         allow_overwrite: bool = True,
         output_model_name: str | None = None,
+        control=None,
     ) -> tuple[str, str]:
         captured_at = item.captured_at
         assert captured_at is not None
@@ -648,7 +767,7 @@ class OrganizerEngine:
         candidate = f"{prefix}_{seq:04d}{ext}"
         candidate_path = target_dir / candidate
         if candidate_path.exists():
-            if allow_overwrite and self._can_overwrite(item, candidate_path):
+            if allow_overwrite and self._can_overwrite(item, candidate_path, **({'control': control} if control else {})):
                 return candidate, "OVERWRITE"
             return candidate, "CONFLICT"
         return candidate, "NEW"
@@ -748,6 +867,14 @@ class OrganizerEngine:
         photo_options = {}
         if getattr(request, "conversion_speed", "balanced") != "balanced":
             photo_options["speed"] = request.conversion_speed
+        from .operation_control import current_control
+        if current_control() is not None:
+            from .isolated_work import isolated_call
+            isolated_call('photo', (source_path, target_path, request.mobile_output_max_width,
+                                   request.mobile_output_jpeg_quality,
+                                   request.mobile_output_keep_smaller_original,
+                                   getattr(request, 'conversion_speed', 'balanced')))
+            return 'SUCCESS'
         self._create_photo_mobile_output(
             source_path=source_path,
             target_path=target_path,
@@ -868,7 +995,7 @@ class OrganizerEngine:
         current = sequence_counters.get(target_dir, 1)
         sequence_counters[target_dir] = max(current, next_seq)
 
-    def _can_overwrite(self, source_item: MediaItem, target_path: Path) -> bool:
+    def _can_overwrite(self, source_item: MediaItem, target_path: Path, control=None) -> bool:
         if not target_path.is_file():
             return False
         if source_item.extension.lower() != target_path.suffix.lower():
@@ -884,8 +1011,23 @@ class OrganizerEngine:
         if not source_metadata:
             return False
         try:
-            target_item = self.extractor.extract(target_path)
+            if control is not None and self._native_extractor():
+                from .isolated_work import isolated_call
+                from .operation_control import OperationInterrupted
+                while True:
+                    self._preview_checkpoint(control)
+                    try:
+                        with control.file_activity(str(target_path), target_path, 'metadata'):
+                            target_item = isolated_call('metadata', (target_path,))
+                        break
+                    except OperationInterrupted:
+                        self._preview_checkpoint(control)
+            else:
+                target_item = self.extractor.extract(target_path)
         except Exception:
+            from .operation_control import OperationStopped
+            if control is not None and control.stop_requested:
+                raise OperationStopped()
             return False
         target_metadata = target_item.metadata.get("source_metadata")
         if not target_metadata:
@@ -909,6 +1051,7 @@ class OrganizerEngine:
         entries.append(("추출된 모델명", sanitize_model_name(item.model_name)))
         entries.append(("일시 출처", item.datetime_source or "-"))
         entries.append(("모델명 출처", item.model_source or "-"))
+        self._append_if_present(entries, "파일명 모델명 안내", item.metadata.get("filename_model_notice"))
         entries.append(("메타 추출 도구", self._format_metadata_tools(source_metadata, item)))
 
         if item.media_type == "photo":

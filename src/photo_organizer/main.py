@@ -12,6 +12,9 @@ from .ui.main_window import MainWindow
 
 
 def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] == '--internal-worker':
+        from .isolated_work import worker_main
+        return worker_main()
     app = QApplication(sys.argv)
     if getattr(sys, "frozen", False):
         base_dir = Path(sys.executable).resolve().parent

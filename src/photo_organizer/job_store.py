@@ -45,6 +45,7 @@ class JobState:
     checkpoint: int = 0
     ledger: dict = field(default_factory=dict)
     legacy_unverified: bool = False
+    metadata_refresh_required: bool = False
 
 
 def _fail(message: str) -> None:
@@ -88,7 +89,7 @@ def _record(cls, value):
             v = [(_string(pair[0], name), _string(pair[1], name)) for pair in pairs]
         elif name == 'warnings':
             v = [_string(x, name) for x in _list(v, name)]
-        elif name in {'selected', 'included', 'filename_edited', 'mobile_output_enabled'}:
+        elif name in {'selected', 'included', 'file_selected', 'filename_edited', 'mobile_output_enabled'}:
             if type(v) is not bool:
                 _fail(name)
         else:
@@ -121,7 +122,7 @@ def _settings(value):
     known = {f.name for f in fields(default)}
     if set(data) - known - GLOBAL_SETTINGS:
         _fail('알 수 없는 작업 설정')
-    kwargs = {'video_encoder': 'cpu', 'conversion_speed': 'balanced', 'photo_workers': 1}
+    kwargs = {'video_encoder': 'cpu', 'conversion_speed': 'balanced', 'photo_workers': 1, 'video_workers': 1, 'mixed_media_workers': False}
     for name, v in data.items():
         if name in GLOBAL_SETTINGS:
             continue
@@ -132,7 +133,7 @@ def _settings(value):
             _string(v, name)
         kwargs[name] = v
     obj = AppSettings(**kwargs)
-    if obj.video_encoder not in {'auto', 'cpu', 'gpu'} or obj.conversion_speed not in {'quality', 'balanced', 'fast'} or obj.photo_workers not in {1, 2, 4}:
+    if obj.video_encoder not in {'auto', 'cpu', 'gpu'} or obj.conversion_speed not in {'quality', 'balanced', 'fast'} or obj.photo_workers not in {1, 2, 4} or obj.video_workers not in {1, 2}:
         _fail('성능 설정 값')
     if obj.operation_mode not in {'copy', 'move'} or obj.phone_conflict_policy not in {'overwrite', 'skip', 'rename'} or obj.mobile_output_video_quality not in VIDEO_QUALITY_PRESETS or obj.model_mapping_scope not in {'filename_and_folders', 'filename_only'}:
         _fail('작업 설정 enum')
@@ -188,6 +189,14 @@ def _bundle(value, execution=False):
             if type(v) is not bool:
                 _fail(name)
             kwargs[name] = v
+        elif name == 'selected_models':
+            if v is None:
+                kwargs[name] = None
+            else:
+                selected = [_string(model, name) for model in _list(v, name)]
+                if len(selected) != len(set(selected)):
+                    _fail('중복 선택 모델')
+                kwargs[name] = selected
         elif name == 'model_name_mappings':
             kwargs[name] = validate_model_mappings(v)
         elif name == 'model_mapping_scope':
@@ -198,6 +207,12 @@ def _bundle(value, execution=False):
     ids = [p.item_id for p in bundle.preview_items]
     if len(ids) != len(set(ids)):
         _fail('중복 item_id')
+    if any(item.included and not item.file_selected for item in bundle.preview_items):
+        _fail('개별 제외 항목이 포함 상태입니다.')
+    if not execution and bundle.selected_models is not None:
+        selected = set(bundle.selected_models)
+        if any(item.included != (item.file_selected and item.model_name in selected) for item in bundle.preview_items):
+            _fail('모델 선택과 개별 선택의 포함 상태가 다릅니다.')
     return bundle
 
 
@@ -228,6 +243,11 @@ def _decode(value):
     if not required <= set(data) or set(data) - ({f.name for f in fields(JobState)} | {'format', 'schema_version'}):
         _fail('작업 필드')
     schema = data['schema_version']
+    metadata_refresh_required = data.get('metadata_refresh_required', False)
+    if type(metadata_refresh_required) is not bool:
+        _fail('metadata_refresh_required 타입')
+    if metadata_refresh_required and data.get('execution_started') is True:
+        _fail('실행 시작 작업에 메타정보 재계획 대기 상태가 있습니다.')
     if data['format'] != 'PhotoOrganizerJob' or type(schema) is not int or schema not in (1, 2):
         _fail('지원하지 않는 작업 형식/스키마')
     if schema == 1 and set(data) & {'plan_id', 'plan_signature', 'execution_id', 'checkpoint', 'ledger', 'legacy_unverified'}:
@@ -257,6 +277,7 @@ def _decode(value):
     if type(data['phase']) is not str or data['phase'] not in PHASES:
         _fail('phase')
     job = JobState(job_id=data['job_id'], revision=data['revision'], phase=data['phase'], settings=_settings(data['settings']), preview_bundle=_bundle(data['preview_bundle']), execution_bundle=_bundle(data['execution_bundle'], True), active_tab=data.get('active_tab', 0), execution_started=data['execution_started'], saved_at_utc=_string(data['saved_at_utc'], 'saved_at_utc'), app_version=_string(data['app_version'], 'app_version'), source_fingerprints=_fingerprints(data.get('source_fingerprints', {}), 'source_fingerprints'), result_fingerprints=_fingerprints(data.get('result_fingerprints', {}), 'result_fingerprints'))
+    job.metadata_refresh_required = metadata_refresh_required
     if schema == 2:
         for name in ('plan_id', 'plan_signature', 'execution_id', 'checkpoint', 'ledger', 'legacy_unverified'):
             setattr(job, name, data[name])
@@ -309,7 +330,7 @@ def _decode(value):
         if job.execution_started:
             job.legacy_unverified = True
         elif job.phase == 'PREVIEW_READY':
-            ensure_plan(job, legacy=True)
+            ensure_plan(job, legacy=True, allow_stale_for_storage=True)
     else:
         if bool(job.plan_id) != bool(job.plan_signature):
             _fail('계획 식별자와 서명이 모순됩니다.')
@@ -364,7 +385,7 @@ def save_job(job: JobState, path: Path) -> None:
     path = Path(path)
     if job.preview_bundle is not None and not job.execution_started:
         from .resume_models import ensure_plan
-        ensure_plan(job)
+        ensure_plan(job, allow_stale_for_storage=True)
     data = _encode(job)
     if job.execution_started and not job.execution_id and not job.ledger and job.checkpoint == 0:
         # Existing in-memory results from the pre-journal engine may be exported,

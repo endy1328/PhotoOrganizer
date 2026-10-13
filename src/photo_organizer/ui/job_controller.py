@@ -72,6 +72,8 @@ class JobControllerMixin:
         uncertain = any(record['state'] in {'IN_PROGRESS', 'UNCERTAIN'}
                         for stages in getattr(self._job_state, 'ledger', {}).values() for record in stages.values())
         phase_label = '확인 필요 단계 있음' if uncertain else PHASE_LABELS[phase]
+        if getattr(self._job_state, 'metadata_refresh_required', False):
+            phase_label = '원본 수정 확인 필요 — 다시 미리보기'
         self.job_status_label.setText(f'{name} — {phase_label}' + (' *' if self._job_dirty else '')
                                       + (' / ' + self._journal_block_reason if self._journal_block_reason else ''))
 
@@ -82,7 +84,7 @@ class JobControllerMixin:
         self.job_menu_button.setEnabled(not busy)
         started = self._job_started()
         self.preview_button.setEnabled(not busy and not started)
-        self.execute_button.setEnabled(not busy and not started)
+        self.execute_button.setEnabled(not busy and not started and not getattr(self._job_state, 'metadata_refresh_required', False))
         self.model_selection_panel.setEnabled(not busy and not started and self.last_execution_bundle is None and bool(self.last_preview_bundle))
         self._update_resume_buttons(busy)
 
@@ -292,14 +294,15 @@ class JobControllerMixin:
             self._preview_detail_column = 0
             self.last_execution_bundle = job.execution_bundle
             self._load_settings()
-            self.last_preview_signature = self._request_signature(self._request_from_inputs(preview_only=True)) if job.preview_bundle else None
+            self.last_preview_signature = (self._request_signature(self._request_from_inputs(preview_only=True))
+                                           if job.preview_bundle and not job.metadata_refresh_required else None)
             self._video_thumbnail_cache.clear()
             self._detail_metadata_cache.clear()
             preview = job.preview_bundle
             execution = job.execution_bundle
             items = preview.preview_items if preview else []
-            self.model_selection_panel.set_items(items)
-            self.model_selection_panel.refresh(items)
+            self.model_selection_panel.set_items(items, preview.selected_models if preview else None)
+            self.model_selection_panel.refresh(items, preview.selected_models if preview else None)
             self._fill_preview_table(items)
             self._fill_results_table(execution.execution_results if execution else [])
             self._fill_error_table(execution.error_items if execution else preview.error_items if preview else [])
@@ -347,7 +350,7 @@ class JobControllerMixin:
         from ..engine import OrganizerEngine
         if not isinstance(self.engine, OrganizerEngine) or job.preview_bundle is None:
             return False
-        if getattr(job, 'legacy_unverified', False):
+        if getattr(job, 'legacy_unverified', False) or getattr(job, 'metadata_refresh_required', False):
             return False
         from ..resume_models import ensure_plan, bundle_from_ledger
         from ..execution_journal import ExecutionJournal
@@ -519,6 +522,9 @@ class JobControllerMixin:
         self._job_mark_changed()
 
     def _job_validate_before_execute(self, request):
+        if getattr(self._job_state, 'metadata_refresh_required', False):
+            QMessageBox.warning(self, '미리보기 필요', '원본 메타정보 수정 이후의 상태를 확인해야 합니다. 다시 미리보기를 실행해주세요.')
+            return False
         if self._job_state and self.last_preview_bundle and not self._job_started():
             try:
                 self._refresh_journal()

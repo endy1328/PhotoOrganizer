@@ -129,13 +129,13 @@ class PhoneVideoLimitTests(unittest.TestCase):
         self.file('a_photo.jpg', 20)
         video = self.file('z_video.mp4', 9)
         phone = Phone()
-        original_list = phone.list_children
-        def grow_after_photo(parent):
-            children = original_list(parent)
-            if phone.uploads:
+        original_upload = phone.upload_new
+        def grow_after_photo(parent, name, source, progress, cancelled):
+            entry = original_upload(parent, name, source, progress, cancelled)
+            if source.name == 'a_photo.jpg':
                 video.write_bytes(b'x' * 30)
-            return children
-        phone.list_children = grow_after_photo
+            return entry
+        phone.upload_new = grow_after_photo
         updates = []
         results = transfer_outputs(phone, 'root', scan_outputs(self.target), limit_video_bytes=10,
                                    progress=updates.append)

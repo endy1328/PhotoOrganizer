@@ -6,7 +6,8 @@ import subprocess
 import threading
 from functools import lru_cache
 from pathlib import Path
-from .process_utils import hidden_process_kwargs
+from .process_utils import hidden_process_kwargs, run_process
+from .operation_control import OperationInterrupted
 
 
 _encoder_report = threading.local()
@@ -75,7 +76,7 @@ def get_gpu_encoder_capability() -> tuple[bool, str]:
                "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr",
                "-b:v", "0", "-cq", "24", "-pix_fmt", "yuv420p", "-f", "null", "-"]
     try:
-        subprocess.run(command, capture_output=True, check=True, timeout=10,
+        run_process(command, capture_output=True, check=True, timeout=10,
                        **hidden_process_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         return False, _process_error_detail(exc)
@@ -104,10 +105,14 @@ def create_mobile_video_output(
     only_if_smaller: bool,
     encoder: str = "cpu",
     speed: str = "balanced",
+    *,
+    clip_seconds: float | None = None,
 ) -> str:
     clear_video_encoder_report()
     if speed not in {"quality", "balanced", "fast"}:
         raise ValueError(f"지원하지 않는 변환 속도: {speed}")
+    if clip_seconds is not None and not 0 < clip_seconds <= 30:
+        raise ValueError("시험 영상 길이는 0초 초과 30초 이하여야 합니다.")
     try:
         backend = resolve_video_encoder(encoder)
     except RuntimeError as exc:
@@ -142,6 +147,8 @@ def create_mobile_video_output(
     ]
     if max_width > 0:
         command.extend(["-vf", f"scale='min({max_width},iw)':-2"])
+    if clip_seconds is not None:
+        command.extend(["-t", str(clip_seconds)])
     command.append(str(temp_path))
     def encode(selected: str) -> None:
         if selected == "gpu":
@@ -157,10 +164,13 @@ def create_mobile_video_output(
                                          selected, speed, normalize_video_quality(quality), source_path)
         _encoder_report.message = "; ".join(report_details + [
             f"인코더={'NVIDIA NVENC' if selected == 'gpu' else 'CPU libx264'} / 속도={speed} / 품질={normalize_video_quality(quality)}"])
-        subprocess.run(command[:-1] + options + command[-1:], capture_output=True,
+        run_process(command[:-1] + options + command[-1:], capture_output=True,
                        check=True, **hidden_process_kwargs())
     try:
         encode(backend)
+    except OperationInterrupted:
+        temp_path.unlink(missing_ok=True)
+        raise
     except (OSError, subprocess.SubprocessError) as exc:
         temp_path.unlink(missing_ok=True)
         if encoder == "auto" and backend == "gpu":
@@ -169,6 +179,9 @@ def create_mobile_video_output(
             logging.getLogger(__name__).warning("GPU 변환 실패, CPU로 한 번 재시도: %s", original_detail)
             try:
                 encode("cpu")
+            except OperationInterrupted:
+                temp_path.unlink(missing_ok=True)
+                raise
             except (OSError, subprocess.SubprocessError) as cpu_exc:
                 temp_path.unlink(missing_ok=True)
                 _encoder_report.message += f"; CPU 실패: {_process_error_detail(cpu_exc)}"

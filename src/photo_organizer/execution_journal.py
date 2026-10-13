@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
+CANCELED_PENDING_MESSAGE = '사용자 요청으로 최종 게시 전에 취소; 임시 파일 정리 완료'
+
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
@@ -52,9 +54,18 @@ class ExecutionJournal:
             raise ValueError('단계 시작 의도 없이 완료를 기록할 수 없습니다.')
         if previous_state == 'IN_PROGRESS':
             if state in {'PENDING', 'NOT_REQUIRED'}:
-                raise ValueError('진행 중인 단계의 실행 의도를 초기화할 수 없습니다.')
+                if not (state == 'PENDING' and record['message'] == CANCELED_PENDING_MESSAGE
+                        and record['fingerprint'] == {} and record['temp_path'] == ''
+                        and previous['fingerprint'] == {}
+                        and previous['message'] != '최종 파일 게시 시작'):
+                    raise ValueError('진행 중인 단계의 실행 의도를 초기화할 수 없습니다.')
             if record['attempt_id'] != previous['attempt_id']:
                 raise ValueError('진행 중인 단계의 시도 식별자를 바꿀 수 없습니다.')
+
+    def cancel_pending(self, job, item_id, stage, attempt_id):
+        """Caller must first clean its owned staging file before using this path."""
+        self.update(job, item_id, stage, {'state': 'PENDING', 'attempt_id': attempt_id,
+                    'fingerprint': {}, 'temp_path': '', 'message': CANCELED_PENDING_MESSAGE})
 
     @staticmethod
     def _rollback(connection):

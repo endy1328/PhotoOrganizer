@@ -70,8 +70,8 @@ class VideoThumbnailUiTests(unittest.TestCase):
         base = self._case_dir("version_title")
         window = MainWindow(OrganizerEngine(base), ConfigManager(base))
         self.assertEqual(window.windowTitle(), f"PhotoOrganizer {__version__} ({__release_date__})")
-        self.assertEqual(__version__, "1.0.1.17")
-        self.assertEqual(__release_date__, "2026-10-12")
+        self.assertEqual(__version__, "1.0.1.27")
+        self.assertEqual(__release_date__, "2026-10-13")
         import tomllib
         project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(project["project"]["version"], __version__)

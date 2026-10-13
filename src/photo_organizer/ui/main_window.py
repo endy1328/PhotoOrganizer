@@ -42,6 +42,7 @@ from ..video_thumbnail import extract_video_thumbnail_bytes
 from .model_selection import ModelSelectionPanel
 from .job_controller import JobControllerMixin
 from .operation_controller import OperationControllerMixin
+from .original_metadata import OriginalMetadataMixin
 from .responsive_layout import FlowLayout, ElidedLabel
 from .dock_panels import DockPanelsMixin
 from ..operation_control import OperationStopped
@@ -67,9 +68,15 @@ class SettingsDialog(QDialog):
     ]
     VIDEO_QUALITY_OPTIONS = [(video_quality_display_label(key), key) for key in VIDEO_QUALITY_PRESETS]
 
-    def __init__(self, parent: QWidget | None, settings: AppSettings, read_only: bool = False) -> None:
+    def __init__(self, parent: QWidget | None, settings: AppSettings, read_only: bool = False,
+                 *, benchmark_source: Path | None = None, benchmark_target: Path | None = None) -> None:
         super().__init__(parent)
         self._read_only = read_only
+        from copy import deepcopy
+        self._benchmark_settings = deepcopy(settings)
+        self._benchmark_source = benchmark_source or (Path(settings.source_path) if settings.source_path else None)
+        self._benchmark_target = benchmark_target or (Path(settings.target_path) if settings.target_path else None)
+        self._benchmark_dialog = None
         self.setWindowTitle("환경설정")
         self.setModal(True)
         self.resize(700, 620)
@@ -238,10 +245,24 @@ class SettingsDialog(QDialog):
         for count in (1, 2, 4):
             self.photo_workers_combo.addItem(f"{count}개", count)
         self._set_combo_value(self.photo_workers_combo, settings.photo_workers)
-        self.photo_workers_combo.setToolTip("사진 모바일 출력의 동시 처리 개수입니다. 일시정지·중단 시 진행 중인 파일을 모두 완료한 뒤 멈춥니다.")
+        self.photo_workers_combo.setToolTip("사진 모바일 출력의 동시 처리 개수입니다. 일시정지·중단 시 진행 중인 변환을 중단하고, 미완료 파일은 재개할 때 다시 처리합니다.")
+        self.video_workers_combo = QComboBox()
+        for count in (1, 2):
+            self.video_workers_combo.addItem(f"{count}개" + (" (기본)" if count == 1 else ""), count)
+        self._set_combo_value(self.video_workers_combo, settings.video_workers)
+        self.video_workers_combo.setToolTip("동영상 모바일 출력의 동시 변환 개수입니다. 2개는 CPU·GPU·디스크·메모리 부하를 높이며 환경에 따라 속도가 느려질 수 있습니다. 일시정지·중단 시 미완료 변환은 재개할 때 다시 처리합니다.")
         performance_layout.addRow("영상 인코더", self.video_encoder_combo)
         performance_layout.addRow("변환 속도", self.conversion_speed_combo)
         performance_layout.addRow("사진 동시 변환", self.photo_workers_combo)
+        performance_layout.addRow("동영상 동시 변환", self.video_workers_combo)
+        self.mixed_media_checkbox = QCheckBox('사진·동영상 혼합 동시 처리')
+        self.mixed_media_checkbox.setChecked(getattr(settings, 'mixed_media_workers', False))
+        self.mixed_media_checkbox.setToolTip('사진과 동영상을 동시에 변환합니다. CPU·GPU·메모리·디스크 경합으로 느려질 수 있으므로 성능 테스트 후 선택하세요. 기본값은 사용 안 함입니다.')
+        performance_layout.addRow('', self.mixed_media_checkbox)
+        self.benchmark_button = QPushButton('성능 테스트')
+        self.benchmark_button.setToolTip('현재 출력 설정으로 임시 변환 시간을 비교합니다. 원본은 변경하지 않으며 추천값은 직접 적용할 수 있습니다.')
+        self.benchmark_button.clicked.connect(self._open_benchmark)
+        performance_layout.addRow('', self.benchmark_button)
         performance_note = QLabel("품질 프로필의 CRF는 CPU 기준이며 GPU에는 CQ를 적용합니다. 같은 숫자도 화질·용량이 다를 수 있습니다.")
         performance_note.setWordWrap(True)
         performance_layout.addRow("", performance_note)
@@ -332,6 +353,8 @@ class SettingsDialog(QDialog):
         self._set_combo_value(self.video_encoder_combo, "auto")
         self._set_combo_value(self.conversion_speed_combo, "balanced")
         self._set_combo_value(self.photo_workers_combo, 2)
+        self._set_combo_value(self.video_workers_combo, 1)
+        self.mixed_media_checkbox.setChecked(False)
         self.video_only_if_smaller_checkbox.setChecked(True)
         self.restore_last_job_checkbox.setChecked(True)
         self.autosave_job_checkbox.setChecked(True)
@@ -374,6 +397,8 @@ class SettingsDialog(QDialog):
         return validate_model_mapping_rows(rows)
 
     def accept(self) -> None:
+        if self._benchmark_running():
+            return
         self.mapping_table.setFocus()  # 표에서 편집 중인 값을 확정한 뒤 검증한다.
         try:
             self._validated_model_mappings()
@@ -382,6 +407,45 @@ class SettingsDialog(QDialog):
             return
         super().accept()
 
+    def _benchmark_running(self) -> bool:
+        return bool(self._benchmark_dialog is not None and self._benchmark_dialog.running)
+
+    def _open_benchmark(self) -> None:
+        if self._read_only or self._processing_locked:
+            return
+        if self._benchmark_dialog is not None and self._benchmark_dialog.isVisible():
+            self._benchmark_dialog.raise_()
+            return
+        from .performance_benchmark_dialog import PerformanceBenchmarkDialog
+        try:
+            settings = self.to_settings(self._benchmark_settings)
+        except ValueError as exc:
+            QMessageBox.warning(self, '설정 확인', str(exc))
+            return
+        dialog = PerformanceBenchmarkDialog(self, settings, self._benchmark_source, self._benchmark_target)
+        self._benchmark_dialog = dialog
+        dialog.recommendation_applied.connect(self._apply_benchmark_recommendation)
+        dialog.show()
+
+    def _apply_benchmark_recommendation(self, video_workers: int, mixed_media_workers: bool) -> None:
+        if self._read_only or self._processing_locked:
+            return
+        self._set_combo_value(self.video_workers_combo, video_workers)
+        self.mixed_media_checkbox.setChecked(mixed_media_workers)
+
+    def reject(self) -> None:
+        if self._benchmark_running():
+            self._benchmark_dialog.request_cancel()
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._benchmark_running():
+            self._benchmark_dialog.request_cancel()
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def to_settings(self, current: AppSettings) -> AppSettings:
         if self._read_only:
             raise ValueError('읽기 전용 설정은 적용할 수 없습니다.')
@@ -389,6 +453,8 @@ class SettingsDialog(QDialog):
             video_encoder=str(self.video_encoder_combo.currentData()),
             conversion_speed=str(self.conversion_speed_combo.currentData()),
             photo_workers=int(self.photo_workers_combo.currentData()),
+            video_workers=int(self.video_workers_combo.currentData()),
+            mixed_media_workers=self.mixed_media_checkbox.isChecked(),
             source_path=current.source_path,
             target_path=current.target_path,
             device_name_override=current.device_name_override,
@@ -416,7 +482,7 @@ class SettingsDialog(QDialog):
 from .execution_controller import ExecutionControllerMixin
 
 
-class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerMixin, JobControllerMixin, QMainWindow):
+class MainWindow(OriginalMetadataMixin, DockPanelsMixin, OperationControllerMixin, ExecutionControllerMixin, JobControllerMixin, QMainWindow):
     def __init__(self, engine: OrganizerEngine, config_manager: ConfigManager) -> None:
         super().__init__()
         self.engine = engine
@@ -590,11 +656,14 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self.tabs.setMinimumSize(0, 150)
         layout.addWidget(self.tabs, 1)
 
-        self.preview_table = self._build_table(["원본 경로", "대상 경로", "처리 방식", "새 파일명", "일시 근거", "모델명 근거", "안내/오류", "영상 모델 조회"])
+        self.preview_table = self._build_table(["원본 경로", "대상 경로", "처리 방식", "새 파일명", "일시 근거", "모델명 근거", "안내/오류", "영상 모델 조회", "output", "처리"])
+        self.preview_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.preview_table.setColumnWidth(9, 60)
+        self.preview_table.horizontalHeader().moveSection(9, 0)
         self.preview_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.preview_table.itemChanged.connect(self._handle_filename_edit)
         self.preview_table.setToolTip("새 파일명을 더블클릭하거나 F2로 수정할 수 있습니다. 분류 폴더와 확장자는 유지됩니다.")
-        self.results_table = self._build_table(["상태", "동작", "처리 방식", "원본", "대상", "모바일 출력", "모바일 출력 경로", "메시지"])
+        self.results_table = self._build_table(["상태", "동작", "처리 방식", "원본", "대상", "모바일 출력", "output", "메시지"])
         self.error_table = self._build_table(["원본 경로", "오류 내용"])
         self.delete_table = self._build_delete_table()
 
@@ -622,6 +691,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self.error_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("error"))
         self.delete_table.itemSelectionChanged.connect(lambda: self._update_selection_detail("delete"))
         self.tabs.currentChanged.connect(self._handle_tab_changed)
+        self.tabs.currentChanged.connect(lambda _index: self._update_original_metadata_controls())
 
     def _build_table(self, headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
@@ -635,7 +705,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         table.setTextElideMode(Qt.ElideNone)
         table.setItemDelegate(ClippedItemDelegate(table))
         header = table.horizontalHeader()
-        header.setSectionsMovable(False)
+        header.setSectionsMovable(True)
         for index in range(len(headers)):
             header.setSectionResizeMode(index, QHeaderView.Interactive)
         self._apply_default_column_widths(table, headers)
@@ -694,13 +764,14 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self.selection_metadata_table.verticalHeader().setVisible(False)
         self.selection_metadata_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         metadata_header = self.selection_metadata_table.horizontalHeader()
-        metadata_header.setSectionsMovable(False)
+        metadata_header.setSectionsMovable(True)
         metadata_header.setSectionResizeMode(0, QHeaderView.Interactive)
-        metadata_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        metadata_header.setSectionResizeMode(1, QHeaderView.Interactive)
         self.selection_metadata_table.setColumnWidth(0, 180)
+        self.selection_metadata_table.setColumnWidth(1, 420)
         self.selection_metadata_table.setMinimumSize(40, 30)
         self.detail_tabs.addTab(self.selection_metadata_table, '메타정보')
-
+        self._build_original_metadata_controls(layout)
         return panel
 
     def _set_details_visible(self, visible):
@@ -735,7 +806,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         table.setTextElideMode(Qt.ElideNone)
         table.setItemDelegate(ClippedItemDelegate(table))
         header = table.horizontalHeader()
-        header.setSectionsMovable(False)
+        header.setSectionsMovable(True)
         for index in range(3):
             header.setSectionResizeMode(index, QHeaderView.Interactive)
         table.setColumnWidth(0, 70)
@@ -761,6 +832,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             "대상": 620,
             "모바일 출력": 120,
             "모바일 출력 경로": 620,
+            "output": 620,
             "메시지": 260,
             "오류 내용": 420,
         }
@@ -794,6 +866,8 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             video_encoder=self.settings.video_encoder,
             conversion_speed=self.settings.conversion_speed,
             photo_workers=self.settings.photo_workers,
+            video_workers=self.settings.video_workers,
+            mixed_media_workers=self.settings.mixed_media_workers,
             source_path=self.source_edit.text().strip(),
             target_path=self.target_edit.text().strip(),
             device_name_override=self.device_name_edit.text().strip(),
@@ -831,8 +905,16 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             dialog.destroyed.connect(lambda: setattr(self, '_busy_settings_dialog', None))
             dialog.show()
             return
-        dialog = SettingsDialog(self, self._current_settings())
-        if dialog.exec() != QDialog.Accepted:
+        source_text, target_text = self.source_edit.text().strip(), self.target_edit.text().strip()
+        dialog = SettingsDialog(self, self._current_settings(),
+                                benchmark_source=Path(source_text) if source_text else None,
+                                benchmark_target=Path(target_text) if target_text else None)
+        self._active_settings_dialog = dialog
+        try:
+            accepted = dialog.exec() == QDialog.Accepted
+        finally:
+            self._active_settings_dialog = None
+        if not accepted:
             return
         self.settings = dialog.to_settings(self._current_settings())
         self._update_mobile_output_summary()
@@ -857,6 +939,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         from .phone_transfer_dialog import PhoneTransferDialog
         dialog = PhoneTransferDialog(
             self, Path(target_text), log_base_dir=self.engine.base_dir,
+            preferences_dir=(self.config_manager.base_dir if isinstance(self.config_manager, ConfigManager) else None),
             conflict_policy=self.settings.phone_conflict_policy,
             video_limit_bytes=(self.settings.phone_video_limit_mb * 1000000 if self.settings.phone_video_limit_enabled else None),
         )
@@ -879,6 +962,8 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             f" / 인코더 { {'auto': '자동', 'cpu': 'CPU', 'gpu': 'GPU'}[self.settings.video_encoder]}"
             f" · 속도 { {'quality': '화질·압축 우선', 'balanced': '균형', 'fast': '빠름'}[self.settings.conversion_speed]}"
             f" · 사진 {self.settings.photo_workers}개 동시"
+            f" · 영상 {self.settings.video_workers}개 동시"
+            f" · 혼합 {'사용' if self.settings.mixed_media_workers else '사용 안 함'}"
         )
 
     def _select_directory(self, line_edit: QLineEdit) -> None:
@@ -941,6 +1026,8 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             video_encoder=self.settings.video_encoder,
             conversion_speed=self.settings.conversion_speed,
             photo_workers=self.settings.photo_workers,
+            video_workers=self.settings.video_workers,
+            mixed_media_workers=self.settings.mixed_media_workers,
             source_path=Path(self.source_edit.text().strip()),
             target_path=Path(self.target_edit.text().strip()),
             device_name_override=self.device_name_edit.text().strip(),
@@ -978,6 +1065,8 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             str(request.mobile_output_video_only_if_smaller),
             str(request.mobile_output_limit_enabled),
             str(request.mobile_output_limit_mb),
+            str(request.video_workers),
+            str(request.mixed_media_workers),
             request.video_encoder,
             request.conversion_speed,
             str(request.photo_workers),
@@ -1024,7 +1113,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self.last_preview_signature = signature
         self.last_execution_bundle = None
         self.current_delete_candidates = []
-        self.model_selection_panel.set_items(bundle.preview_items)
+        self.model_selection_panel.set_items(bundle.preview_items, getattr(bundle, 'selected_models', None))
         self._fill_preview_table(bundle.preview_items)
         self._fill_error_table(bundle.error_items)
         self.results_table.setRowCount(0)
@@ -1119,9 +1208,9 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
                 model_mapping_scope=request.model_mapping_scope,
             )
             self.last_preview_signature = current_signature
-            self.model_selection_panel.set_items(bundle.preview_items)
+            self.model_selection_panel.set_items(bundle.preview_items, getattr(self.last_preview_bundle, 'selected_models', None))
         self.last_execution_bundle = bundle
-        self.model_selection_panel.refresh(bundle.preview_items)
+        self.model_selection_panel.refresh(bundle.preview_items, getattr(self.last_preview_bundle, 'selected_models', None))
         self.current_delete_candidates = bundle.delete_review_items
         self._fill_preview_table(bundle.preview_items)
         self._fill_results_table(bundle.execution_results)
@@ -1205,12 +1294,17 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         for row, item in enumerate(items):
             entries = dict(item.metadata_entries)
             notices = ([entries["모델명 보완"]] if item.model_name == "UNKNOWN" and entries.get("모델명 보완") else [])
+            if entries.get("파일명 모델명 안내"):
+                notices.append(entries["파일명 모델명 안내"])
             if item.filename_edited:
                 notices.append("사용자 파일명 수정(분류 폴더 유지)")
             warning_text = "; ".join(notices + item.warnings)
             included = getattr(item, "included", True)
             action_text = self._write_mode_label(item.write_mode) if included else "제외"
-            values = [item.source_path, item.target_path, action_text, item.new_filename, item.datetime_source, item.model_source, warning_text, entries.get("영상 모델 조회", "-")]
+            output_path = item.mobile_output_path if item.mobile_output_enabled and item.mobile_output_path else "-"
+            if not included:
+                warning_text = ('사용자 파일 제외' if not item.file_selected else '모델 선택 제외') + ('; ' + warning_text if warning_text else '')
+            values = [item.source_path, item.target_path, action_text, item.new_filename, item.datetime_source, item.model_source, warning_text, entries.get("영상 모델 조회", "-"), output_path, ""]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 if not included:
@@ -1223,29 +1317,38 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
                     cell.setFlags(cell.flags() | Qt.ItemIsEditable)
                     cell.setData(Qt.UserRole, item.item_id)
                 cell.setToolTip(value)
+                if column == 9:
+                    cell.setData(Qt.UserRole, item.item_id)
+                    if self._preview_change_allowed():
+                        cell.setFlags(cell.flags() | Qt.ItemIsUserCheckable)
+                    else:
+                        cell.setFlags(cell.flags() & ~Qt.ItemIsUserCheckable)
+                    cell.setCheckState(Qt.Checked if item.file_selected else Qt.Unchecked)
+                    cell.setToolTip('이 파일의 처리 여부. 최종 처리에는 모델 선택도 적용됩니다.')
                 self.preview_table.setItem(row, column, cell)
         self.preview_table.blockSignals(False)
+        self._update_original_metadata_controls()
 
     def _handle_model_selection(self, selected_models: set[str]) -> None:
         bundle = self.last_preview_bundle
         if bundle is None:
             return
         if self._busy or self.last_execution_bundle is not None or self._job_started():
-            self.model_selection_panel.refresh(bundle.preview_items)
+            self.model_selection_panel.refresh(bundle.preview_items, getattr(bundle, 'selected_models', None))
             return
         current = self._request_from_inputs(preview_only=True)
         if self.last_preview_signature != self._request_signature(current):
-            self.model_selection_panel.refresh(bundle.preview_items)
+            self.model_selection_panel.refresh(bundle.preview_items, getattr(bundle, 'selected_models', None))
             QMessageBox.warning(self, "미리보기 필요", "입력이나 설정이 변경되었습니다. 미리보기를 다시 만든 뒤 모델을 선택해주세요.")
             return
         try:
             self.engine.set_selected_models(bundle, selected_models)
         except (ValueError, OSError) as exc:
-            self.model_selection_panel.refresh(bundle.preview_items)
+            self.model_selection_panel.refresh(bundle.preview_items, getattr(bundle, 'selected_models', None))
             self._set_status(f"모델 선택 실패: {exc}")
             QMessageBox.warning(self, "모델 선택 실패", str(exc))
             return
-        self.model_selection_panel.refresh(bundle.preview_items)
+        self.model_selection_panel.refresh(bundle.preview_items, getattr(bundle, 'selected_models', None))
         self._fill_preview_table(bundle.preview_items)
         self._fill_error_table(bundle.error_items)
         self._set_status("모델 선택 적용: " + self.model_selection_panel.summary_label.text())
@@ -1253,6 +1356,9 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self._job_mark_changed()
 
     def _handle_filename_edit(self, cell: QTableWidgetItem) -> None:
+        if cell.column() == 9:
+            self._handle_file_check(cell)
+            return
         if self._busy or self._job_started():
             return
         if cell.column() != 3 or self.last_preview_bundle is None:
@@ -1347,11 +1453,14 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self._update_selection_detail("results")
 
     def _handle_preview_item_clicked(self, item: QTableWidgetItem) -> None:
-        if item.column() in (0, 1, 3):
+        if item.column() in (0, 1, 3, 8):
             self._preview_detail_column = item.column()
         self._update_selection_detail("preview")
 
     def _preview_detail_target(self, row: int) -> tuple[Path | None, str]:
+        if self._preview_detail_column == 8:
+            text = self._cell_text(self.preview_table, row, 8)
+            return (Path(text) if text and text != '-' else None), '모바일 출력 파일'
         column = 0 if self._preview_detail_column == 0 else 1
         text = self._cell_text(self.preview_table, row, column)
         kind = '원본 파일' if column == 0 else '대상 파일'
@@ -1391,8 +1500,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             except OSError:
                 available = False
             if not available:
-                lines.insert(2, '현재 파일 상태: 대상 파일이 아직 없습니다. 미생성 또는 누락된 파일입니다.'
-                             if detail_kind == '대상 파일' else '현재 파일 상태: 원본 파일을 찾을 수 없습니다.')
+                lines.insert(2, self._missing_detail_file_message(detail_kind))
                 entries = []
             elif (detail_kind == '원본 파일' and preview_item is not None and preview_item.metadata_entries
                   and self._preview_metadata_fingerprints.get(preview_item.source_path) is not None
@@ -1423,6 +1531,9 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
                 f"메시지: {self._cell_text(self.results_table, row, 7)}",
             ]
             lines.append(f"상세 기준: {detail_kind}")
+            lines.append(f"상세 파일 경로: {detail_path or '-'}")
+            if detail_path is None or self._file_detail_fingerprint(detail_path) is None:
+                lines.append(self._missing_detail_file_message(detail_kind))
             if result_item is not None:
                 if getattr(result_item, "mobile_output_message", ""):
                     lines.append(f"모바일 출력 안내: {result_item.mobile_output_message}")
@@ -1576,7 +1687,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
             mobile_output_text = self._cell_text(self.results_table, row, 6)
             if mobile_output_text and mobile_output_text != "-":
                 return Path(mobile_output_text), "모바일 출력 파일"
-            self._results_detail_column = 4
+            return None, '모바일 출력 파일'
         if self._results_detail_column == 4:
             target_text = self._cell_text(self.results_table, row, 4)
             if target_text and target_text != "-":
@@ -1586,6 +1697,14 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         if source_text and source_text != "-":
             return Path(source_text), "원본 파일"
         return None, "원본 파일"
+
+    @staticmethod
+    def _missing_detail_file_message(kind: str) -> str:
+        if kind == '모바일 출력 파일':
+            return '현재 파일 상태: 출력 파일이 아직 없습니다. 출력 미사용·제외·미생성 또는 누락된 파일입니다.'
+        if kind == '대상 파일':
+            return '현재 파일 상태: 대상 파일이 아직 없습니다. 미생성 또는 누락된 파일입니다.'
+        return '현재 파일 상태: 원본 파일을 찾을 수 없습니다.'
 
     @staticmethod
     def _file_detail_fingerprint(path: Path) -> tuple[int, int] | None:
@@ -1774,6 +1893,7 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
                        self.source_select_button, self.target_select_button):
             widget.setEnabled(not busy and not self._job_started())
         self._job_controls_busy(busy)
+        self._refresh_file_checks()
         self._poll_operation_control()
         QApplication.processEvents()
         if not busy:
@@ -1800,6 +1920,11 @@ class MainWindow(DockPanelsMixin, OperationControllerMixin, ExecutionControllerM
         self.progress_bar.setFormat(message)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        settings_dialog = getattr(self, '_active_settings_dialog', None)
+        if settings_dialog is not None and settings_dialog._benchmark_running():
+            settings_dialog._benchmark_dialog.request_cancel()
+            event.ignore()
+            return
         if self._busy:
             event.ignore()
             return

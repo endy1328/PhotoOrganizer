@@ -46,13 +46,14 @@ class ModelSelectionUiTests(unittest.TestCase):
     def bundle(*args, **kwargs):
         items = []
         for index, (model, kind) in enumerate((("CAM_A", "photo"), ("CAM_A", "video"), ("CAM_B", "photo"), ("UNKNOWN", "video"))):
-            items.append(SimpleNamespace(item_id=str(index), media_type=kind, source_path=f"source/{index}.jpg", target_directory="target/date/model", target_path=f"target/{index}.jpg", new_filename=f"{index}.jpg", write_mode="NEW", captured_at="2024-01-01", datetime_source="메타", model_name=model, model_source="메타", warnings=[], metadata_entries=[], filename_edited=False, included=True, mobile_output_enabled=False, mobile_output_path=""))
-        return SimpleNamespace(preview_items=items, error_items=[], log_events=[], selection_applied=False)
+            items.append(SimpleNamespace(item_id=str(index), media_type=kind, source_path=f"source/{index}.jpg", target_directory="target/date/model", target_path=f"target/{index}.jpg", new_filename=f"{index}.jpg", write_mode="NEW", captured_at="2024-01-01", datetime_source="메타", model_name=model, model_source="메타", warnings=[], metadata_entries=[], filename_edited=False, included=True, file_selected=True, mobile_output_enabled=False, mobile_output_path=""))
+        return SimpleNamespace(preview_items=items, error_items=[], log_events=[], selection_applied=False, selected_models=None)
 
     @staticmethod
     def select(bundle, selected):
         for item in bundle.preview_items:
-            item.included = item.model_name in selected
+            item.included = item.file_selected and item.model_name in selected
+        bundle.selected_models = sorted(selected)
         bundle.selection_applied = True
 
     def preview(self):

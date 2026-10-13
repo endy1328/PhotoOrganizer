@@ -26,8 +26,8 @@ class OperationControllerMixin:
         self.stop_button.setEnabled(False)
         self.pause_button.clicked.connect(self._toggle_operation_pause)
         self.stop_button.clicked.connect(self._request_operation_stop)
-        self.pause_button.setToolTip('현재 파일과 완료 기록을 마친 뒤 일시정지합니다. 정지 요청 중에도 재개할 수 있습니다.')
-        self.stop_button.setToolTip('현재 파일을 마친 뒤 남은 파일을 시작하지 않습니다. 긴 영상은 변환이 끝난 뒤 중단합니다.')
+        self.pause_button.setToolTip('현재 처리를 취소하고 일시정지합니다. 재개하면 취소된 단계를 다시 처리합니다.')
+        self.stop_button.setToolTip('현재 처리를 취소하고 중단합니다. 완료된 결과와 원본은 안전하게 보존합니다.')
         row.addWidget(self.pause_button)
         row.addWidget(self.stop_button)
 
@@ -61,11 +61,11 @@ class OperationControllerMixin:
             return
         self.pause_button.setText('재개' if control.pause_requested or control.paused else '일시정지')
         if control.stop_requested:
-            self._set_status('중단 요청 중 — 현재 파일과 완료 기록을 마친 뒤 중단합니다.')
+            self._set_status('중단 중 — 현재 처리를 취소하고 임시 파일을 정리합니다.')
         elif control.paused:
             self._set_status('일시정지 — 재개 또는 중단을 선택할 수 있습니다.')
         elif control.pause_requested:
-            self._set_status('일시정지 요청 중 — 현재 파일과 완료 기록을 마친 뒤 대기합니다.')
+            self._set_status('일시정지 중 — 현재 처리를 취소하고 임시 파일을 정리합니다.')
 
     @Slot(str, int, int)
     def _receive_operation_progress(self, message, current, total):
@@ -110,8 +110,14 @@ class OperationControllerMixin:
             operation_error = exc
             raise
         finally:
+            from ..isolated_work import close_workers
+            cleanup_error = None
             try:
-                self._finish_execution_progress(error=operation_error)
+                close_workers(control)
+            except Exception as exc:
+                cleanup_error = exc
+            try:
+                self._finish_execution_progress(error=operation_error or cleanup_error)
             except Exception as display_error:
                 self._set_status(f'진행 표시 종료 오류: {display_error} — 실행 결과를 확인해주세요.')
             finally:
@@ -127,6 +133,8 @@ class OperationControllerMixin:
             loop.deleteLater()
             if not was_busy:
                 self._set_busy(False)
+            if cleanup_error is not None and operation_error is None:
+                raise cleanup_error
 
     def _snapshot_operation_settings(self, args, kwargs):
         """Read-only inspector snapshot of the actual submitted request or job."""

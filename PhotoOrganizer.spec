@@ -23,12 +23,19 @@ version_info = VSVersionInfo(
 )
 
 hiddenimports = collect_submodules("PIL")
+vendor_dir = Path(SPECPATH) / "tools" / "exiftool"
+if not (vendor_dir / "exiftool.exe").is_file() or not (vendor_dir / "manifest.json").is_file():
+    raise RuntimeError("Pinned ExifTool is missing. Run scripts/vendor_exiftool.py --install first.")
+vendor_check = runpy.run_path(str(Path(SPECPATH) / "scripts" / "vendor_exiftool.py"))
+vendor_check["verify"]()
+vendor_datas = [(str(path), "tools/exiftool/" + path.relative_to(vendor_dir).parent.as_posix())
+                for path in sorted(vendor_dir.rglob("*")) if path.is_file()]
 
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[(str(Path(SPECPATH) / "src" / "photo_organizer" / "resources" / "phone_wpd.cs"), "photo_organizer/resources")],
+    datas=[(str(Path(SPECPATH) / "src" / "photo_organizer" / "resources" / "phone_wpd.cs"), "photo_organizer/resources"), *vendor_datas],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
